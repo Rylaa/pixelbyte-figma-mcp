@@ -105,4 +105,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Author
 
-Yusuf Demirkoparan ([@nicepixelbyte](https://github.com/nicepixelbyte))
+@PixelByte
