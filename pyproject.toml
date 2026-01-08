@@ -1,0 +1,51 @@
+[project]
+name = "pixelbyte-figma-mcp"
+version = "1.0.0"
+description = "MCP Server for Figma API - Design token extraction, screenshot, and code generation for React, Vue, SwiftUI, Kotlin"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Yusuf Demirkoparan", email = "yusuf@pixelbyte.dev"}
+]
+keywords = [
+    "figma",
+    "mcp",
+    "model-context-protocol",
+    "design-tokens",
+    "code-generation",
+    "react",
+    "tailwind",
+    "swiftui",
+    "kotlin"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+]
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/nicepixelbyte/pixelbyte-figma-mcp"
+Repository = "https://github.com/nicepixelbyte/pixelbyte-figma-mcp"
+Issues = "https://github.com/nicepixelbyte/pixelbyte-figma-mcp/issues"
+
+[project.scripts]
+pixelbyte-figma-mcp = "figma_mcp:mcp.run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
