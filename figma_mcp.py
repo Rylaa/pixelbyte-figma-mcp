@@ -314,6 +314,30 @@ class FigmaSpacingInput(BaseModel):
         return v.replace('-', ':') if v else None
 
 
+class FigmaStylesInput(BaseModel):
+    """Input model for published styles retrieval."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    file_key: str = Field(..., description="Figma file key", min_length=10, max_length=50)
+    include_fill_styles: bool = Field(default=True, description="Include fill/color styles")
+    include_text_styles: bool = Field(default=True, description="Include text/typography styles")
+    include_effect_styles: bool = Field(default=True, description="Include effect styles (shadows, blurs)")
+    include_grid_styles: bool = Field(default=True, description="Include grid/layout styles")
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' or 'json'"
+    )
+
+    @field_validator('file_key')
+    @classmethod
+    def validate_file_key(cls, v: str) -> str:
+        if 'figma.com' in v:
+            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
+            if match:
+                return match.group(1)
+        return v
+
+
 # ============================================================================
 # Code Connect Input Models
 # ============================================================================
@@ -557,30 +581,516 @@ def _rgba_to_hex(color: Dict[str, float]) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def _extract_colors_from_node(node: Dict[str, Any], colors: List[Dict[str, Any]]) -> None:
-    """Recursively extract colors from node tree."""
-    # Fill colors
-    fills = node.get('fills', [])
-    for fill in fills:
-        if fill.get('type') == 'SOLID' and fill.get('visible', True):
-            color = fill.get('color', {})
-            colors.append({
-                'name': node.get('name', 'Unknown'),
-                'type': 'fill',
-                'value': _rgba_to_hex(color),
-                'opacity': fill.get('opacity', 1)
+def _calculate_gradient_angle(handle_positions: List[Dict[str, float]]) -> float:
+    """Calculate gradient angle from Figma handle positions."""
+    if not handle_positions or len(handle_positions) < 2:
+        return 0
+
+    start = handle_positions[0]
+    end = handle_positions[1]
+
+    dx = end.get('x', 0) - start.get('x', 0)
+    dy = end.get('y', 0) - start.get('y', 0)
+
+    import math
+    angle = math.degrees(math.atan2(dy, dx))
+    # Convert to CSS gradient angle (0deg = up, clockwise)
+    css_angle = 90 - angle
+    return round(css_angle, 2)
+
+
+def _extract_gradient_stops(gradient_stops: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Extract gradient color stops."""
+    stops = []
+    for stop in gradient_stops:
+        color = stop.get('color', {})
+        stops.append({
+            'position': round(stop.get('position', 0), 4),
+            'color': _rgba_to_hex(color),
+            'opacity': color.get('a', 1)
+        })
+    return stops
+
+
+def _extract_fill_data(fill: Dict[str, Any], node_name: str) -> Optional[Dict[str, Any]]:
+    """Extract comprehensive fill data including gradients and images."""
+    if not fill.get('visible', True):
+        return None
+
+    fill_type = fill.get('type', 'SOLID')
+
+    base_data = {
+        'name': node_name,
+        'category': 'fill',
+        'fillType': fill_type,
+        'opacity': fill.get('opacity', 1),
+        'blendMode': fill.get('blendMode', 'NORMAL')
+    }
+
+    if fill_type == 'SOLID':
+        color = fill.get('color', {})
+        base_data['color'] = _rgba_to_hex(color)
+
+    elif fill_type in ['GRADIENT_LINEAR', 'GRADIENT_RADIAL', 'GRADIENT_ANGULAR', 'GRADIENT_DIAMOND']:
+        gradient_stops = fill.get('gradientStops', [])
+        handle_positions = fill.get('gradientHandlePositions', [])
+
+        base_data['gradient'] = {
+            'type': fill_type.replace('GRADIENT_', ''),
+            'stops': _extract_gradient_stops(gradient_stops),
+            'handlePositions': handle_positions
+        }
+
+        if fill_type == 'GRADIENT_LINEAR':
+            base_data['gradient']['angle'] = _calculate_gradient_angle(handle_positions)
+
+    elif fill_type == 'IMAGE':
+        base_data['image'] = {
+            'imageRef': fill.get('imageRef'),
+            'scaleMode': fill.get('scaleMode', 'FILL'),
+            'imageTransform': fill.get('imageTransform'),
+            'scalingFactor': fill.get('scalingFactor'),
+            'rotation': fill.get('rotation', 0),
+            'filters': fill.get('filters', {})
+        }
+
+    return base_data
+
+
+def _extract_stroke_data(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract comprehensive stroke data."""
+    strokes = node.get('strokes', [])
+    if not strokes:
+        return None
+
+    stroke_colors = []
+    for stroke in strokes:
+        if stroke.get('visible', True):
+            stroke_type = stroke.get('type', 'SOLID')
+            stroke_data = {
+                'type': stroke_type,
+                'opacity': stroke.get('opacity', 1),
+                'blendMode': stroke.get('blendMode', 'NORMAL')
+            }
+
+            if stroke_type == 'SOLID':
+                stroke_data['color'] = _rgba_to_hex(stroke.get('color', {}))
+            elif stroke_type.startswith('GRADIENT_'):
+                stroke_data['gradient'] = {
+                    'type': stroke_type.replace('GRADIENT_', ''),
+                    'stops': _extract_gradient_stops(stroke.get('gradientStops', [])),
+                    'handlePositions': stroke.get('gradientHandlePositions', [])
+                }
+
+            stroke_colors.append(stroke_data)
+
+    return {
+        'colors': stroke_colors,
+        'weight': node.get('strokeWeight', 1),
+        'align': node.get('strokeAlign', 'INSIDE'),
+        'cap': node.get('strokeCap', 'NONE'),
+        'join': node.get('strokeJoin', 'MITER'),
+        'miterLimit': node.get('strokeMiterLimit', 4),
+        'dashes': node.get('strokeDashes', []),
+        'dashCap': node.get('strokeDashCap', 'NONE')
+    }
+
+
+def _extract_corner_radii(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract individual corner radii."""
+    # Check for individual corner radii first
+    if 'rectangleCornerRadii' in node:
+        radii = node['rectangleCornerRadii']
+        return {
+            'topLeft': radii[0] if len(radii) > 0 else 0,
+            'topRight': radii[1] if len(radii) > 1 else 0,
+            'bottomRight': radii[2] if len(radii) > 2 else 0,
+            'bottomLeft': radii[3] if len(radii) > 3 else 0,
+            'isUniform': len(set(radii)) == 1
+        }
+
+    # Fall back to single cornerRadius
+    corner_radius = node.get('cornerRadius', 0)
+    if corner_radius:
+        return {
+            'topLeft': corner_radius,
+            'topRight': corner_radius,
+            'bottomRight': corner_radius,
+            'bottomLeft': corner_radius,
+            'isUniform': True
+        }
+
+    return None
+
+
+def _extract_constraints(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract layout constraints for responsive behavior."""
+    constraints = node.get('constraints', {})
+    if not constraints:
+        return None
+
+    return {
+        'horizontal': constraints.get('horizontal', 'LEFT'),
+        'vertical': constraints.get('vertical', 'TOP')
+    }
+
+
+def _extract_transform(node: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract transform properties."""
+    transform = {
+        'rotation': node.get('rotation', 0),
+        'preserveRatio': node.get('preserveRatio', False)
+    }
+
+    if 'relativeTransform' in node:
+        transform['relativeTransform'] = node['relativeTransform']
+
+    return transform
+
+
+def _extract_component_info(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract component/instance information."""
+    node_type = node.get('type', '')
+
+    if node_type == 'INSTANCE':
+        return {
+            'isInstance': True,
+            'componentId': node.get('componentId'),
+            'componentProperties': node.get('componentProperties', {}),
+            'overrides': node.get('overrides', []),
+            'exposedInstances': node.get('exposedInstances', [])
+        }
+    elif node_type == 'COMPONENT':
+        return {
+            'isComponent': True,
+            'componentPropertyDefinitions': node.get('componentPropertyDefinitions', {}),
+            'componentSetId': node.get('componentSetId')
+        }
+    elif node_type == 'COMPONENT_SET':
+        return {
+            'isComponentSet': True,
+            'componentPropertyDefinitions': node.get('componentPropertyDefinitions', {})
+        }
+
+    return None
+
+
+def _extract_bound_variables(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract Figma variables bound to this node."""
+    bound_variables = node.get('boundVariables', {})
+    if not bound_variables:
+        return None
+
+    extracted = {}
+    for prop, binding in bound_variables.items():
+        if isinstance(binding, dict):
+            extracted[prop] = {
+                'variableId': binding.get('id'),
+                'type': binding.get('type')
+            }
+        elif isinstance(binding, list):
+            # For properties that can have multiple bindings (like fills)
+            extracted[prop] = [
+                {'variableId': b.get('id'), 'type': b.get('type')}
+                for b in binding if isinstance(b, dict)
+            ]
+
+    return extracted if extracted else None
+
+
+def _extract_effects_data(node: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract all effects (shadows, blurs) from a node."""
+    effects = node.get('effects', [])
+
+    shadows = []
+    blurs = []
+
+    for effect in effects:
+        if not effect.get('visible', True):
+            continue
+
+        effect_type = effect.get('type', '')
+
+        if effect_type in ['DROP_SHADOW', 'INNER_SHADOW']:
+            color = effect.get('color', {})
+            offset = effect.get('offset', {'x': 0, 'y': 0})
+            shadows.append({
+                'type': effect_type,
+                'color': _rgba_to_hex(color),
+                'offset': {
+                    'x': offset.get('x', 0),
+                    'y': offset.get('y', 0)
+                },
+                'radius': effect.get('radius', 0),
+                'spread': effect.get('spread', 0),
+                'blendMode': effect.get('blendMode', 'NORMAL'),
+                'showShadowBehindNode': effect.get('showShadowBehindNode', False)
+            })
+        elif effect_type in ['LAYER_BLUR', 'BACKGROUND_BLUR']:
+            blurs.append({
+                'type': effect_type,
+                'radius': effect.get('radius', 0)
             })
 
-    # Stroke colors
-    strokes = node.get('strokes', [])
-    for stroke in strokes:
-        if stroke.get('type') == 'SOLID' and stroke.get('visible', True):
-            color = stroke.get('color', {})
+    return {
+        'shadows': shadows if shadows else None,
+        'blurs': blurs if blurs else None
+    }
+
+
+def _extract_auto_layout(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract comprehensive auto-layout properties."""
+    layout_mode = node.get('layoutMode')
+    if not layout_mode or layout_mode == 'NONE':
+        return None
+
+    return {
+        'mode': layout_mode,
+        'padding': {
+            'top': node.get('paddingTop', 0),
+            'right': node.get('paddingRight', 0),
+            'bottom': node.get('paddingBottom', 0),
+            'left': node.get('paddingLeft', 0)
+        },
+        'gap': node.get('itemSpacing', 0),
+        'primaryAxisAlign': node.get('primaryAxisAlignItems', 'MIN'),
+        'counterAxisAlign': node.get('counterAxisAlignItems', 'MIN'),
+        'primaryAxisSizing': node.get('primaryAxisSizingMode', 'AUTO'),
+        'counterAxisSizing': node.get('counterAxisSizingMode', 'AUTO'),
+        'layoutWrap': node.get('layoutWrap', 'NO_WRAP'),
+        'itemReverseZIndex': node.get('itemReverseZIndex', False),
+        'strokesIncludedInLayout': node.get('strokesIncludedInLayout', False)
+    }
+
+
+def _extract_size_constraints(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract min/max size constraints."""
+    constraints = {}
+
+    if 'minWidth' in node:
+        constraints['minWidth'] = node['minWidth']
+    if 'maxWidth' in node:
+        constraints['maxWidth'] = node['maxWidth']
+    if 'minHeight' in node:
+        constraints['minHeight'] = node['minHeight']
+    if 'maxHeight' in node:
+        constraints['maxHeight'] = node['maxHeight']
+
+    return constraints if constraints else None
+
+
+# ============================================================================
+# CSS Code Generation Helpers
+# ============================================================================
+
+def _gradient_to_css(fill: Dict[str, Any]) -> Optional[str]:
+    """Convert Figma gradient fill to CSS gradient string."""
+    fill_type = fill.get('type', '')
+
+    if 'GRADIENT' not in fill_type:
+        return None
+
+    gradient_stops = fill.get('gradientStops', [])
+    if not gradient_stops:
+        return None
+
+    # Build color stops string
+    stops_css = []
+    for stop in gradient_stops:
+        color = stop.get('color', {})
+        position = stop.get('position', 0)
+        hex_color = _rgba_to_hex(color)
+        alpha = color.get('a', 1)
+        if alpha < 1:
+            # Use rgba for transparency
+            r = int(color.get('r', 0) * 255)
+            g = int(color.get('g', 0) * 255)
+            b = int(color.get('b', 0) * 255)
+            stops_css.append(f"rgba({r}, {g}, {b}, {alpha:.2f}) {int(position * 100)}%")
+        else:
+            stops_css.append(f"{hex_color} {int(position * 100)}%")
+
+    stops_str = ', '.join(stops_css)
+
+    if fill_type == 'GRADIENT_LINEAR':
+        # Calculate angle from gradient handle positions
+        handle_positions = fill.get('gradientHandlePositions', [])
+        angle = _calculate_gradient_angle(handle_positions)
+        return f"linear-gradient({int(angle)}deg, {stops_str})"
+
+    elif fill_type == 'GRADIENT_RADIAL':
+        return f"radial-gradient(circle, {stops_str})"
+
+    elif fill_type == 'GRADIENT_ANGULAR':
+        return f"conic-gradient({stops_str})"
+
+    elif fill_type == 'GRADIENT_DIAMOND':
+        # Diamond gradient approximated as radial
+        return f"radial-gradient(ellipse, {stops_str})"
+
+    return None
+
+
+def _corner_radii_to_css(node: Dict[str, Any]) -> str:
+    """Convert Figma corner radii to CSS border-radius."""
+    # Check for individual corner radii
+    if 'rectangleCornerRadii' in node:
+        radii = node['rectangleCornerRadii']
+        if len(radii) == 4:
+            tl, tr, br, bl = radii
+            if tl == tr == br == bl:
+                return f"{int(tl)}px"
+            return f"{int(tl)}px {int(tr)}px {int(br)}px {int(bl)}px"
+
+    # Fallback to single cornerRadius
+    corner_radius = node.get('cornerRadius', 0)
+    if corner_radius:
+        return f"{int(corner_radius)}px"
+
+    return ""
+
+
+def _transform_to_css(node: Dict[str, Any]) -> Optional[str]:
+    """Convert Figma transform properties to CSS transform."""
+    transforms = []
+
+    # Rotation
+    rotation = node.get('rotation', 0)
+    if rotation:
+        # Figma uses clockwise rotation in radians, CSS uses counter-clockwise degrees
+        angle_deg = -rotation * (180 / 3.14159265359)
+        if abs(angle_deg) > 0.1:  # Only add if significant
+            transforms.append(f"rotate({angle_deg:.1f}deg)")
+
+    # relativeTransform matrix (skew, scale)
+    relative_transform = node.get('relativeTransform')
+    if relative_transform and len(relative_transform) >= 2:
+        # relativeTransform is [[a, b, tx], [c, d, ty]]
+        a = relative_transform[0][0] if len(relative_transform[0]) > 0 else 1
+        b = relative_transform[0][1] if len(relative_transform[0]) > 1 else 0
+        c = relative_transform[1][0] if len(relative_transform[1]) > 0 else 0
+        d = relative_transform[1][1] if len(relative_transform[1]) > 1 else 1
+
+        # Check for scale (not just rotation which we already handled)
+        scale_x = (a**2 + c**2)**0.5
+        scale_y = (b**2 + d**2)**0.5
+        if abs(scale_x - 1) > 0.01 or abs(scale_y - 1) > 0.01:
+            if abs(scale_x - scale_y) < 0.01:
+                transforms.append(f"scale({scale_x:.2f})")
+            else:
+                transforms.append(f"scale({scale_x:.2f}, {scale_y:.2f})")
+
+    return ' '.join(transforms) if transforms else None
+
+
+def _blend_mode_to_css(blend_mode: str) -> Optional[str]:
+    """Convert Figma blend mode to CSS mix-blend-mode."""
+    blend_map = {
+        'PASS_THROUGH': None,  # Default, no CSS needed
+        'NORMAL': None,
+        'DARKEN': 'darken',
+        'MULTIPLY': 'multiply',
+        'LINEAR_BURN': 'color-burn',
+        'COLOR_BURN': 'color-burn',
+        'LIGHTEN': 'lighten',
+        'SCREEN': 'screen',
+        'LINEAR_DODGE': 'color-dodge',
+        'COLOR_DODGE': 'color-dodge',
+        'OVERLAY': 'overlay',
+        'SOFT_LIGHT': 'soft-light',
+        'HARD_LIGHT': 'hard-light',
+        'DIFFERENCE': 'difference',
+        'EXCLUSION': 'exclusion',
+        'HUE': 'hue',
+        'SATURATION': 'saturation',
+        'COLOR': 'color',
+        'LUMINOSITY': 'luminosity'
+    }
+    return blend_map.get(blend_mode)
+
+
+def _get_background_css(node: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """Extract background CSS (color or gradient) from node fills.
+
+    Returns:
+        tuple: (background_value, background_type) where type is 'color' or 'gradient'
+    """
+    fills = node.get('fills', [])
+    if not fills:
+        return None, None
+
+    for fill in fills:
+        if not fill.get('visible', True):
+            continue
+
+        fill_type = fill.get('type', '')
+
+        if fill_type == 'SOLID':
+            color = fill.get('color', {})
+            opacity = fill.get('opacity', 1)
+            hex_color = _rgba_to_hex(color)
+
+            if opacity < 1:
+                r = int(color.get('r', 0) * 255)
+                g = int(color.get('g', 0) * 255)
+                b = int(color.get('b', 0) * 255)
+                return f"rgba({r}, {g}, {b}, {opacity:.2f})", 'color'
+
+            return hex_color, 'color'
+
+        elif 'GRADIENT' in fill_type:
+            gradient_css = _gradient_to_css(fill)
+            if gradient_css:
+                return gradient_css, 'gradient'
+
+        elif fill_type == 'IMAGE':
+            # Return placeholder for image
+            image_ref = fill.get('imageRef', '')
+            return f"/* Image: {image_ref} */", 'image'
+
+    return None, None
+
+
+def _extract_colors_from_node(node: Dict[str, Any], colors: List[Dict[str, Any]]) -> None:
+    """Recursively extract colors from node tree with full gradient and image support."""
+    node_name = node.get('name', 'Unknown')
+
+    # Fill colors (with gradient and image support)
+    fills = node.get('fills', [])
+    for fill in fills:
+        fill_data = _extract_fill_data(fill, node_name)
+        if fill_data:
+            colors.append(fill_data)
+
+    # Stroke colors (using comprehensive stroke extraction)
+    stroke_data = _extract_stroke_data(node)
+    if stroke_data and stroke_data['colors']:
+        for stroke_color in stroke_data['colors']:
             colors.append({
-                'name': node.get('name', 'Unknown'),
-                'type': 'stroke',
-                'value': _rgba_to_hex(color),
-                'opacity': stroke.get('opacity', 1)
+                'name': node_name,
+                'category': 'stroke',
+                'fillType': stroke_color.get('type', 'SOLID'),
+                'color': stroke_color.get('color'),
+                'gradient': stroke_color.get('gradient'),
+                'opacity': stroke_color.get('opacity', 1),
+                'blendMode': stroke_color.get('blendMode', 'NORMAL'),
+                'strokeWeight': stroke_data['weight'],
+                'strokeAlign': stroke_data['align']
+            })
+
+    # Shadow colors
+    effects_data = _extract_effects_data(node)
+    if effects_data['shadows']:
+        for shadow in effects_data['shadows']:
+            colors.append({
+                'name': node_name,
+                'category': 'shadow',
+                'fillType': 'SOLID',
+                'color': shadow['color'],
+                'shadowType': shadow['type'],
+                'offset': shadow['offset'],
+                'radius': shadow['radius'],
+                'spread': shadow['spread']
             })
 
     # Recurse into children
@@ -589,17 +1099,67 @@ def _extract_colors_from_node(node: Dict[str, Any], colors: List[Dict[str, Any]]
 
 
 def _extract_typography_from_node(node: Dict[str, Any], typography: List[Dict[str, Any]]) -> None:
-    """Recursively extract typography from node tree."""
+    """Recursively extract typography from node tree with advanced text properties."""
     if node.get('type') == 'TEXT':
         style = node.get('style', {})
+
+        # Extract text fills for color
+        fills = node.get('fills', [])
+        text_color = None
+        text_gradient = None
+        for fill in fills:
+            if fill.get('visible', True):
+                if fill.get('type') == 'SOLID':
+                    text_color = _rgba_to_hex(fill.get('color', {}))
+                elif fill.get('type', '').startswith('GRADIENT_'):
+                    text_gradient = {
+                        'type': fill.get('type').replace('GRADIENT_', ''),
+                        'stops': _extract_gradient_stops(fill.get('gradientStops', []))
+                    }
+                break
+
         typography.append({
             'name': node.get('name', 'Unknown'),
+            'characters': node.get('characters', ''),
+
+            # Font properties
             'fontFamily': style.get('fontFamily', 'Unknown'),
             'fontWeight': style.get('fontWeight', 400),
             'fontSize': style.get('fontSize', 16),
+            'fontStyle': style.get('italic', False) and 'italic' or 'normal',
+
+            # Spacing
             'lineHeight': style.get('lineHeightPx'),
+            'lineHeightUnit': style.get('lineHeightUnit', 'PIXELS'),
+            'lineHeightPercent': style.get('lineHeightPercent'),
             'letterSpacing': style.get('letterSpacing', 0),
-            'textAlign': style.get('textAlignHorizontal', 'LEFT')
+            'paragraphSpacing': style.get('paragraphSpacing', 0),
+            'paragraphIndent': style.get('paragraphIndent', 0),
+
+            # Alignment
+            'textAlign': style.get('textAlignHorizontal', 'LEFT'),
+            'textAlignVertical': style.get('textAlignVertical', 'TOP'),
+
+            # Decoration
+            'textCase': style.get('textCase', 'ORIGINAL'),
+            'textDecoration': style.get('textDecoration', 'NONE'),
+
+            # Auto-resize
+            'textAutoResize': node.get('textAutoResize', 'NONE'),
+
+            # Truncation
+            'textTruncation': node.get('textTruncation', 'DISABLED'),
+            'maxLines': node.get('maxLines'),
+
+            # Color
+            'color': text_color,
+            'gradient': text_gradient,
+
+            # OpenType features
+            'openTypeFeatures': style.get('openTypeFeatures', {}),
+
+            # Hyperlink
+            'hyperlink': node.get('hyperlink')
         })
 
     for child in node.get('children', []):
@@ -607,30 +1167,52 @@ def _extract_typography_from_node(node: Dict[str, Any], typography: List[Dict[st
 
 
 def _extract_spacing_from_node(node: Dict[str, Any], spacing: List[Dict[str, Any]]) -> None:
-    """Recursively extract spacing/padding from node tree."""
-    # Auto-layout padding
-    if 'paddingLeft' in node or 'itemSpacing' in node:
+    """Recursively extract spacing/padding from node tree with advanced layout properties."""
+    node_name = node.get('name', 'Unknown')
+
+    # Auto-layout properties (comprehensive)
+    auto_layout = _extract_auto_layout(node)
+    if auto_layout:
         spacing.append({
-            'name': node.get('name', 'Unknown'),
+            'name': node_name,
             'type': 'auto-layout',
-            'paddingTop': node.get('paddingTop', 0),
-            'paddingRight': node.get('paddingRight', 0),
-            'paddingBottom': node.get('paddingBottom', 0),
-            'paddingLeft': node.get('paddingLeft', 0),
-            'itemSpacing': node.get('itemSpacing', 0),
-            'layoutMode': node.get('layoutMode', 'NONE')
+            **auto_layout
         })
 
     # Absolute bounds
     bbox = node.get('absoluteBoundingBox', {})
     if bbox:
-        spacing.append({
-            'name': node.get('name', 'Unknown'),
+        bounds_data = {
+            'name': node_name,
             'type': 'bounds',
             'width': bbox.get('width', 0),
             'height': bbox.get('height', 0),
             'x': bbox.get('x', 0),
             'y': bbox.get('y', 0)
+        }
+
+        # Add size constraints if present
+        size_constraints = _extract_size_constraints(node)
+        if size_constraints:
+            bounds_data['sizeConstraints'] = size_constraints
+
+        # Add layout positioning for children in auto-layout
+        if 'layoutAlign' in node:
+            bounds_data['layoutAlign'] = node['layoutAlign']
+        if 'layoutGrow' in node:
+            bounds_data['layoutGrow'] = node['layoutGrow']
+        if 'layoutPositioning' in node:
+            bounds_data['layoutPositioning'] = node['layoutPositioning']
+
+        spacing.append(bounds_data)
+
+    # Layout constraints for responsive behavior
+    constraints = _extract_constraints(node)
+    if constraints:
+        spacing.append({
+            'name': node_name,
+            'type': 'constraints',
+            **constraints
         })
 
     for child in node.get('children', []):
@@ -638,19 +1220,31 @@ def _extract_spacing_from_node(node: Dict[str, Any], spacing: List[Dict[str, Any
 
 
 def _extract_shadows_from_node(node: Dict[str, Any], shadows: List[Dict[str, Any]]) -> None:
-    """Recursively extract shadow colors from node tree."""
-    effects = node.get('effects', [])
-    for effect in effects:
-        if 'SHADOW' in effect.get('type', '') and effect.get('visible', True):
-            color = effect.get('color', {})
+    """Recursively extract all effects (shadows and blurs) from node tree."""
+    effects_data = _extract_effects_data(node)
+    node_name = node.get('name', 'Unknown')
+
+    # Add shadows
+    if effects_data['shadows']:
+        for shadow in effects_data['shadows']:
             shadows.append({
-                'name': node.get('name', 'Unknown'),
-                'type': effect.get('type'),
-                'hex': _rgba_to_hex(color),
-                'rgba': f"rgba({int(color.get('r', 0) * 255)}, {int(color.get('g', 0) * 255)}, {int(color.get('b', 0) * 255)}, {color.get('a', 1):.2f})",
-                'offset': effect.get('offset', {'x': 0, 'y': 0}),
-                'radius': effect.get('radius', 0),
-                'spread': effect.get('spread', 0)
+                'name': node_name,
+                'type': shadow['type'],
+                'color': shadow['color'],
+                'offset': shadow['offset'],
+                'radius': shadow['radius'],
+                'spread': shadow['spread'],
+                'blendMode': shadow['blendMode'],
+                'showShadowBehindNode': shadow['showShadowBehindNode']
+            })
+
+    # Add blurs
+    if effects_data['blurs']:
+        for blur in effects_data['blurs']:
+            shadows.append({
+                'name': node_name,
+                'type': blur['type'],
+                'radius': blur['radius']
             })
 
     for child in node.get('children', []):
@@ -742,7 +1336,7 @@ export default {component_name};
 
 
 def _recursive_node_to_vue_template(node: Dict[str, Any], indent: int = 4, use_tailwind: bool = True) -> str:
-    """Recursively generate Vue template code for nested children."""
+    """Recursively generate Vue template code for nested children with enhanced styles."""
     lines = []
     prefix = ' ' * indent
     node_type = node.get('type', '')
@@ -752,18 +1346,31 @@ def _recursive_node_to_vue_template(node: Dict[str, Any], indent: int = 4, use_t
     width = int(bbox.get('width', 0))
     height = int(bbox.get('height', 0))
 
+    # Fills (with gradient support)
     fills = node.get('fills', [])
-    bg_color = ''
-    if fills and fills[0].get('type') == 'SOLID' and fills[0].get('visible', True):
-        bg_color = _rgba_to_hex(fills[0].get('color', {}))
+    bg_value, bg_type = _get_background_css(node)
 
-    strokes = node.get('strokes', [])
+    # Strokes
+    stroke_data = _extract_stroke_data(node)
     stroke_color = ''
-    stroke_weight = node.get('strokeWeight', 0)
-    if strokes and strokes[0].get('type') == 'SOLID' and strokes[0].get('visible', True):
-        stroke_color = _rgba_to_hex(strokes[0].get('color', {}))
+    stroke_weight = stroke_data['weight'] if stroke_data else 0
+    if stroke_data and stroke_data['colors']:
+        first_stroke = stroke_data['colors'][0]
+        if first_stroke.get('type') == 'SOLID':
+            stroke_color = first_stroke.get('color', '')
 
-    corner_radius = node.get('cornerRadius', 0)
+    # Corner radius (with individual corners)
+    corner_radius_css = _corner_radii_to_css(node)
+
+    # Transform
+    transform_css = _transform_to_css(node)
+
+    # Blend mode and opacity
+    blend_mode = node.get('blendMode', 'PASS_THROUGH')
+    blend_mode_css = _blend_mode_to_css(blend_mode)
+    opacity = node.get('opacity', 1)
+
+    # Layout
     layout_mode = node.get('layoutMode')
     gap = node.get('itemSpacing', 0)
     padding_top = node.get('paddingTop', 0)
@@ -794,22 +1401,49 @@ def _recursive_node_to_vue_template(node: Dict[str, Any], indent: int = 4, use_t
     else:
         if use_tailwind:
             classes = []
+            inline_styles = []
+
             if width:
                 classes.append(f'w-[{width}px]')
             if height:
                 classes.append(f'h-[{height}px]')
-            if bg_color:
-                classes.append(f'bg-[{bg_color}]')
-            if corner_radius:
-                classes.append(f'rounded-[{corner_radius}px]')
+
+            # Background
+            if bg_value and bg_type:
+                if bg_type == 'color':
+                    classes.append(f'bg-[{bg_value}]')
+                elif bg_type == 'gradient':
+                    inline_styles.append(f"background: {bg_value}")
+
+            # Corner radius
+            if corner_radius_css:
+                classes.append(f'rounded-[{corner_radius_css}]')
+
+            # Strokes
             if stroke_color and stroke_weight:
                 classes.append(f'border-[{stroke_weight}px]')
                 classes.append(f'border-[{stroke_color}]')
+
+            # Transform
+            if transform_css:
+                inline_styles.append(f"transform: {transform_css}")
+
+            # Blend mode
+            if blend_mode_css:
+                classes.append(f'mix-blend-{blend_mode_css}')
+
+            # Opacity
+            if opacity < 1:
+                classes.append(f'opacity-[{opacity}]')
+
+            # Layout
             if layout_mode:
                 classes.append('flex')
                 classes.append('flex-col' if layout_mode == 'VERTICAL' else 'flex-row')
                 if gap:
                     classes.append(f'gap-[{gap}px]')
+
+            # Padding
             if padding_top:
                 classes.append(f'pt-[{padding_top}px]')
             if padding_right:
@@ -820,7 +1454,12 @@ def _recursive_node_to_vue_template(node: Dict[str, Any], indent: int = 4, use_t
                 classes.append(f'pl-[{padding_left}px]')
 
             class_str = ' '.join(filter(None, classes))
-            lines.append(f'{prefix}<div class="{class_str}">')
+
+            if inline_styles:
+                style_str = '; '.join(inline_styles)
+                lines.append(f'{prefix}<div class="{class_str}" style="{style_str}">')
+            else:
+                lines.append(f'{prefix}<div class="{class_str}">')
         else:
             class_name = name.lower().replace(' ', '-').replace('/', '-')
             lines.append(f'{prefix}<div class="{class_name}">')
@@ -945,27 +1584,46 @@ def _generate_recursive_css(node: Dict[str, Any], rules: List[str], parent_name:
 
 
 def _generate_css_code(node: Dict[str, Any], component_name: str) -> str:
-    """Generate pure CSS code from Figma node."""
+    """Generate pure CSS code from Figma node with enhanced style support."""
     bbox = node.get('absoluteBoundingBox', {})
     width = bbox.get('width', 'auto')
     height = bbox.get('height', 'auto')
 
-    fills = node.get('fills', [])
-    bg_color = ''
-    if fills and fills[0].get('type') == 'SOLID' and fills[0].get('visible', True):
-        bg_color = _rgba_to_hex(fills[0].get('color', {}))
+    # Background (with gradient support)
+    bg_value, bg_type = _get_background_css(node)
+    bg_css = ''
+    if bg_value and bg_type:
+        if bg_type == 'color':
+            bg_css = f"background-color: {bg_value};"
+        elif bg_type == 'gradient':
+            bg_css = f"background: {bg_value};"
 
-    # Strokes
-    strokes = node.get('strokes', [])
+    # Strokes (comprehensive)
+    stroke_data = _extract_stroke_data(node)
     stroke_css = ''
-    if strokes and strokes[0].get('type') == 'SOLID':
-        stroke_color = _rgba_to_hex(strokes[0].get('color', {}))
-        stroke_weight = node.get('strokeWeight', 1)
-        stroke_css = f"border: {stroke_weight}px solid {stroke_color};"
+    if stroke_data and stroke_data['colors']:
+        first_stroke = stroke_data['colors'][0]
+        if first_stroke.get('type') == 'SOLID':
+            stroke_color = first_stroke.get('color', '')
+            stroke_weight = stroke_data['weight']
+            stroke_css = f"border: {stroke_weight}px solid {stroke_color};"
 
-    # Border radius
-    corner_radius = node.get('cornerRadius', 0)
-    radius_css = f"border-radius: {corner_radius}px;" if corner_radius else ''
+    # Border radius (with individual corners)
+    corner_radius_css = _corner_radii_to_css(node)
+    radius_css = f"border-radius: {corner_radius_css};" if corner_radius_css else ''
+
+    # Transform (rotation, scale)
+    transform_css = _transform_to_css(node)
+    transform_line = f"transform: {transform_css};" if transform_css else ''
+
+    # Blend mode
+    blend_mode = node.get('blendMode', 'PASS_THROUGH')
+    blend_mode_css = _blend_mode_to_css(blend_mode)
+    blend_line = f"mix-blend-mode: {blend_mode_css};" if blend_mode_css else ''
+
+    # Opacity
+    opacity = node.get('opacity', 1)
+    opacity_css = f"opacity: {opacity};" if opacity < 1 else ''
 
     # Auto-layout
     layout_mode = node.get('layoutMode')
@@ -977,30 +1635,72 @@ def _generate_css_code(node: Dict[str, Any], component_name: str) -> str:
         padding_right = node.get('paddingRight', 0)
         padding_bottom = node.get('paddingBottom', 0)
         padding_left = node.get('paddingLeft', 0)
+
+        # Alignment
+        primary_align = node.get('primaryAxisAlignItems', 'MIN')
+        counter_align = node.get('counterAxisAlignItems', 'MIN')
+        justify_map = {'MIN': 'flex-start', 'CENTER': 'center', 'MAX': 'flex-end', 'SPACE_BETWEEN': 'space-between'}
+        items_map = {'MIN': 'flex-start', 'CENTER': 'center', 'MAX': 'flex-end'}
+
         layout_css = f"""display: flex;
   flex-direction: {direction};
   gap: {gap}px;
-  padding: {padding_top}px {padding_right}px {padding_bottom}px {padding_left}px;"""
+  padding: {padding_top}px {padding_right}px {padding_bottom}px {padding_left}px;
+  justify-content: {justify_map.get(primary_align, 'flex-start')};
+  align-items: {items_map.get(counter_align, 'flex-start')};"""
 
-    # Effects (shadows)
-    effects = node.get('effects', [])
+    # Effects (shadows and blurs)
+    effects_data = _extract_effects_data(node)
     shadow_css = ''
-    for effect in effects:
-        if 'SHADOW' in effect.get('type', '') and effect.get('visible', True):
-            color = effect.get('color', {})
-            offset = effect.get('offset', {'x': 0, 'y': 0})
-            radius = effect.get('radius', 0)
-            shadow_css = f"box-shadow: {offset.get('x', 0)}px {offset.get('y', 0)}px {radius}px {_rgba_to_hex(color)};"
-            break
+    blur_css = ''
+
+    if effects_data['shadows']:
+        shadow_parts = []
+        for shadow in effects_data['shadows']:
+            offset = shadow.get('offset', {'x': 0, 'y': 0})
+            shadow_type = shadow.get('type', 'DROP_SHADOW')
+            inset = 'inset ' if shadow_type == 'INNER_SHADOW' else ''
+            shadow_parts.append(
+                f"{inset}{int(offset.get('x', 0))}px {int(offset.get('y', 0))}px {int(shadow.get('radius', 0))}px {int(shadow.get('spread', 0))}px {shadow.get('color', '#000')}"
+            )
+        shadow_css = f"box-shadow: {', '.join(shadow_parts)};"
+
+    if effects_data['blurs']:
+        for blur in effects_data['blurs']:
+            if blur.get('type') == 'LAYER_BLUR':
+                blur_css = f"filter: blur({int(blur.get('radius', 0))}px);"
+            elif blur.get('type') == 'BACKGROUND_BLUR':
+                blur_css = f"backdrop-filter: blur({int(blur.get('radius', 0))}px);"
+
+    # Build final CSS
+    css_lines = [
+        f"width: {int(width)}px;",
+        f"height: {int(height)}px;",
+    ]
+
+    if bg_css:
+        css_lines.append(bg_css)
+    if stroke_css:
+        css_lines.append(stroke_css)
+    if radius_css:
+        css_lines.append(radius_css)
+    if transform_line:
+        css_lines.append(transform_line)
+    if blend_line:
+        css_lines.append(blend_line)
+    if opacity_css:
+        css_lines.append(opacity_css)
+    if shadow_css:
+        css_lines.append(shadow_css)
+    if blur_css:
+        css_lines.append(blur_css)
+    if layout_css:
+        css_lines.append(layout_css)
+
+    css_content = '\n  '.join(css_lines)
 
     code = f'''.{component_name.lower()} {{
-  width: {int(width)}px;
-  height: {int(height)}px;
-  {f"background-color: {bg_color};" if bg_color else ''}
-  {stroke_css}
-  {radius_css}
-  {layout_css}
-  {shadow_css}
+  {css_content}
 }}'''
     return code
 
@@ -1011,12 +1711,49 @@ def _generate_scss_code(node: Dict[str, Any], component_name: str) -> str:
     width = bbox.get('width', 'auto')
     height = bbox.get('height', 'auto')
 
-    fills = node.get('fills', [])
-    bg_color = ''
-    if fills and fills[0].get('type') == 'SOLID' and fills[0].get('visible', True):
-        bg_color = _rgba_to_hex(fills[0].get('color', {}))
+    # Background (with gradient support)
+    bg_value, bg_type = _get_background_css(node)
 
-    corner_radius = node.get('cornerRadius', 0)
+    # Individual corner radii
+    border_radius_css = _corner_radii_to_css(node)
+
+    # Transform (rotation, scale)
+    transform_css = _transform_to_css(node)
+
+    # Blend mode
+    blend_mode = node.get('blendMode', 'PASS_THROUGH')
+    blend_mode_css = _blend_mode_to_css(blend_mode)
+
+    # Opacity
+    opacity = node.get('opacity', 1)
+
+    # Effects (shadows and blurs)
+    effects = node.get('effects', [])
+    shadow_parts = []
+    blur_value = None
+    backdrop_blur = None
+
+    for effect in effects:
+        if not effect.get('visible', True):
+            continue
+        effect_type = effect.get('type', '')
+        if effect_type in ['DROP_SHADOW', 'INNER_SHADOW']:
+            color = effect.get('color', {})
+            offset_x = effect.get('offset', {}).get('x', 0)
+            offset_y = effect.get('offset', {}).get('y', 0)
+            blur = effect.get('radius', 0)
+            spread = effect.get('spread', 0)
+            r = int(color.get('r', 0) * 255)
+            g = int(color.get('g', 0) * 255)
+            b = int(color.get('b', 0) * 255)
+            a = color.get('a', 1)
+            inset = 'inset ' if effect_type == 'INNER_SHADOW' else ''
+            shadow_parts.append(f'{inset}{offset_x}px {offset_y}px {blur}px {spread}px rgba({r}, {g}, {b}, {a:.2f})')
+        elif effect_type == 'LAYER_BLUR':
+            blur_value = effect.get('radius', 0)
+        elif effect_type == 'BACKGROUND_BLUR':
+            backdrop_blur = effect.get('radius', 0)
+
     layout_mode = node.get('layoutMode')
     gap = node.get('itemSpacing', 0)
     padding_top = node.get('paddingTop', 0)
@@ -1024,50 +1761,220 @@ def _generate_scss_code(node: Dict[str, Any], component_name: str) -> str:
     padding_bottom = node.get('paddingBottom', 0)
     padding_left = node.get('paddingLeft', 0)
 
-    variables = f'''// {component_name} Variables
-$width: {int(width)}px;
-$height: {int(height)}px;
-{f"$bg-color: {bg_color};" if bg_color else ''}
-$border-radius: {corner_radius}px;
-$gap: {gap}px;
-$padding: {padding_top}px {padding_right}px {padding_bottom}px {padding_left}px;
-'''
+    # Advanced layout properties
+    primary_align = node.get('primaryAxisAlignItems', 'MIN')
+    counter_align = node.get('counterAxisAlignItems', 'MIN')
+    layout_wrap = node.get('layoutWrap', 'NO_WRAP')
 
-    direction = 'column' if layout_mode == 'VERTICAL' else 'row' if layout_mode else ''
-    layout_scss = f'''display: flex;
-    flex-direction: {direction};
-    gap: $gap;
-    padding: $padding;''' if layout_mode else ''
+    # Map Figma alignment to CSS
+    align_map = {'MIN': 'flex-start', 'CENTER': 'center', 'MAX': 'flex-end', 'SPACE_BETWEEN': 'space-between'}
+    justify_content = align_map.get(primary_align, 'flex-start')
+    align_items = align_map.get(counter_align, 'flex-start')
+
+    # Build SCSS variables
+    variables_list = [
+        f'// {component_name} Variables',
+        f'$width: {int(width)}px;',
+        f'$height: {int(height)}px;',
+    ]
+
+    if bg_type == 'color' and bg_value:
+        variables_list.append(f'$bg-color: {bg_value};')
+    elif bg_type == 'gradient' and bg_value:
+        variables_list.append(f'$bg-gradient: {bg_value};')
+
+    variables_list.append(f'$border-radius: {border_radius_css};')
+    variables_list.append(f'$gap: {gap}px;')
+    variables_list.append(f'$padding: {padding_top}px {padding_right}px {padding_bottom}px {padding_left}px;')
+
+    if shadow_parts:
+        variables_list.append(f'$box-shadow: {", ".join(shadow_parts)};')
+    if opacity < 1:
+        variables_list.append(f'$opacity: {opacity:.2f};')
+    if transform_css:
+        variables_list.append(f'$transform: {transform_css};')
+
+    variables = '\n'.join(variables_list)
+
+    # Build styles
+    styles_list = [
+        'width: $width;',
+        'height: $height;',
+    ]
+
+    if bg_type == 'color':
+        styles_list.append('background-color: $bg-color;')
+    elif bg_type == 'gradient':
+        styles_list.append('background: $bg-gradient;')
+    elif bg_type == 'image':
+        styles_list.append(f'background: url("{bg_value}") center/cover no-repeat;')
+
+    styles_list.append('border-radius: $border-radius;')
+
+    if shadow_parts:
+        styles_list.append('box-shadow: $box-shadow;')
+
+    if opacity < 1:
+        styles_list.append('opacity: $opacity;')
+
+    if transform_css:
+        styles_list.append('transform: $transform;')
+
+    if blend_mode_css:
+        styles_list.append(f'mix-blend-mode: {blend_mode_css};')
+
+    if blur_value:
+        styles_list.append(f'filter: blur({blur_value}px);')
+
+    if backdrop_blur:
+        styles_list.append(f'backdrop-filter: blur({backdrop_blur}px);')
+
+    if layout_mode:
+        styles_list.extend([
+            'display: flex;',
+            f'flex-direction: {"column" if layout_mode == "VERTICAL" else "row"};',
+            f'justify-content: {justify_content};',
+            f'align-items: {align_items};',
+            'gap: $gap;',
+            'padding: $padding;',
+        ])
+        if layout_wrap == 'WRAP':
+            styles_list.append('flex-wrap: wrap;')
+
+    styles = '\n  '.join(styles_list)
 
     code = f'''{variables}
 
-.{component_name.lower()} {{
-  width: $width;
-  height: $height;
-  {f"background-color: $bg-color;" if bg_color else ''}
-  border-radius: $border-radius;
-  {layout_scss}
+.{component_name.lower().replace(" ", "-")} {{
+  {styles}
 }}'''
     return code
 
 
 def _generate_swiftui_code(node: Dict[str, Any], component_name: str) -> str:
-    """Generate SwiftUI code from Figma node."""
+    """Generate SwiftUI code from Figma node with comprehensive style support."""
     bbox = node.get('absoluteBoundingBox', {})
     width = bbox.get('width', 100)
     height = bbox.get('height', 100)
 
+    # Background (with gradient support)
     fills = node.get('fills', [])
-    bg_color = ''
-    if fills and fills[0].get('type') == 'SOLID' and fills[0].get('visible', True):
-        color = fills[0].get('color', {})
-        r = color.get('r', 0)
-        g = color.get('g', 0)
-        b = color.get('b', 0)
-        a = color.get('a', 1)
-        bg_color = f"Color(red: {r:.3f}, green: {g:.3f}, blue: {b:.3f}, opacity: {a:.2f})"
+    bg_code = ''
+    gradient_def = ''
 
+    for fill in fills:
+        if not fill.get('visible', True):
+            continue
+        fill_type = fill.get('type', '')
+
+        if fill_type == 'SOLID':
+            color = fill.get('color', {})
+            r = color.get('r', 0)
+            g = color.get('g', 0)
+            b = color.get('b', 0)
+            a = fill.get('opacity', color.get('a', 1))
+            bg_code = f"Color(red: {r:.3f}, green: {g:.3f}, blue: {b:.3f}, opacity: {a:.2f})"
+            break
+
+        elif fill_type == 'GRADIENT_LINEAR':
+            stops = fill.get('gradientStops', [])
+            if stops:
+                gradient_stops = []
+                for stop in stops:
+                    pos = stop.get('position', 0)
+                    c = stop.get('color', {})
+                    gradient_stops.append(
+                        f"Gradient.Stop(color: Color(red: {c.get('r', 0):.3f}, green: {c.get('g', 0):.3f}, blue: {c.get('b', 0):.3f}), location: {pos:.2f})"
+                    )
+                gradient_def = f'''
+    let gradient = LinearGradient(
+        stops: [
+            {(",{chr(10)}            ").join(gradient_stops)}
+        ],
+        startPoint: .leading,
+        endPoint: .trailing
+    )'''
+                bg_code = 'gradient'
+            break
+
+        elif fill_type == 'GRADIENT_RADIAL':
+            stops = fill.get('gradientStops', [])
+            if stops:
+                gradient_stops = []
+                for stop in stops:
+                    pos = stop.get('position', 0)
+                    c = stop.get('color', {})
+                    gradient_stops.append(
+                        f"Gradient.Stop(color: Color(red: {c.get('r', 0):.3f}, green: {c.get('g', 0):.3f}, blue: {c.get('b', 0):.3f}), location: {pos:.2f})"
+                    )
+                gradient_def = f'''
+    let gradient = RadialGradient(
+        stops: [
+            {(",{chr(10)}            ").join(gradient_stops)}
+        ],
+        center: .center,
+        startRadius: 0,
+        endRadius: {max(width, height) / 2}
+    )'''
+                bg_code = 'gradient'
+            break
+
+    # Individual corner radii
+    corner_radii = node.get('rectangleCornerRadii', [])
     corner_radius = node.get('cornerRadius', 0)
+    corner_code = ''
+
+    if corner_radii and len(corner_radii) == 4:
+        tl, tr, br, bl = corner_radii
+        if tl == tr == br == bl:
+            corner_code = f'.cornerRadius({tl})' if tl > 0 else ''
+        else:
+            # SwiftUI doesn't support individual corners directly, use clipShape with custom shape
+            corner_code = f'.clipShape(RoundedCorner(topLeft: {tl}, topRight: {tr}, bottomRight: {br}, bottomLeft: {bl}))'
+    elif corner_radius:
+        corner_code = f'.cornerRadius({corner_radius})'
+
+    # Rotation
+    rotation = node.get('rotation', 0)
+    rotation_code = f'.rotationEffect(.degrees({rotation:.1f}))' if rotation != 0 else ''
+
+    # Opacity
+    opacity = node.get('opacity', 1)
+    opacity_code = f'.opacity({opacity:.2f})' if opacity < 1 else ''
+
+    # Blend mode
+    blend_mode = node.get('blendMode', 'PASS_THROUGH')
+    blend_map = {
+        'MULTIPLY': '.multiply', 'SCREEN': '.screen', 'OVERLAY': '.overlay',
+        'DARKEN': '.darken', 'LIGHTEN': '.lighten', 'COLOR_DODGE': '.colorDodge',
+        'COLOR_BURN': '.colorBurn', 'SOFT_LIGHT': '.softLight', 'HARD_LIGHT': '.hardLight',
+        'DIFFERENCE': '.difference', 'EXCLUSION': '.exclusion'
+    }
+    blend_code = f'.blendMode({blend_map[blend_mode]})' if blend_mode in blend_map else ''
+
+    # Effects (shadows and blurs)
+    effects = node.get('effects', [])
+    shadow_codes = []
+    blur_code = ''
+
+    for effect in effects:
+        if not effect.get('visible', True):
+            continue
+        effect_type = effect.get('type', '')
+
+        if effect_type == 'DROP_SHADOW':
+            color = effect.get('color', {})
+            offset_x = effect.get('offset', {}).get('x', 0)
+            offset_y = effect.get('offset', {}).get('y', 0)
+            blur = effect.get('radius', 0)
+            r, g, b = color.get('r', 0), color.get('g', 0), color.get('b', 0)
+            a = color.get('a', 0.25)
+            shadow_codes.append(
+                f'.shadow(color: Color(red: {r:.3f}, green: {g:.3f}, blue: {b:.3f}, opacity: {a:.2f}), radius: {blur}, x: {offset_x}, y: {offset_y})'
+            )
+        elif effect_type == 'LAYER_BLUR':
+            blur_code = f'.blur(radius: {effect.get("radius", 0)})'
+
     layout_mode = node.get('layoutMode')
     gap = node.get('itemSpacing', 0)
     padding_top = node.get('paddingTop', 0)
@@ -1075,33 +1982,93 @@ def _generate_swiftui_code(node: Dict[str, Any], component_name: str) -> str:
     padding_bottom = node.get('paddingBottom', 0)
     padding_left = node.get('paddingLeft', 0)
 
-    # Determine container type
+    # Advanced alignment
+    primary_align = node.get('primaryAxisAlignItems', 'MIN')
+    counter_align = node.get('counterAxisAlignItems', 'MIN')
+
+    # Determine container type and alignment
     container = 'VStack' if layout_mode == 'VERTICAL' else 'HStack' if layout_mode == 'HORIZONTAL' else 'ZStack'
-    spacing = f"spacing: {gap}" if gap else ''
+
+    h_align_map = {'MIN': '.leading', 'CENTER': '.center', 'MAX': '.trailing'}
+    v_align_map = {'MIN': '.top', 'CENTER': '.center', 'MAX': '.bottom'}
+
+    if layout_mode == 'VERTICAL':
+        alignment = h_align_map.get(counter_align, '.center')
+    else:
+        alignment = v_align_map.get(counter_align, '.center')
+
+    spacing_param = f"alignment: {alignment}, spacing: {gap}" if gap else f"alignment: {alignment}"
 
     # Generate children
     children_code = _generate_swiftui_children(node.get('children', []))
 
+    # Build modifiers
+    modifiers = []
+    modifiers.append(f'.frame(width: {int(width)}, height: {int(height)})')
+    if bg_code:
+        modifiers.append(f'.background({bg_code})')
+    if corner_code:
+        modifiers.append(corner_code)
+    modifiers.extend(shadow_codes)
+    if blur_code:
+        modifiers.append(blur_code)
+    if rotation_code:
+        modifiers.append(rotation_code)
+    if opacity_code:
+        modifiers.append(opacity_code)
+    if blend_code:
+        modifiers.append(blend_code)
+    if padding_top or padding_right or padding_bottom or padding_left:
+        modifiers.append(f'.padding(EdgeInsets(top: {padding_top}, leading: {padding_left}, bottom: {padding_bottom}, trailing: {padding_right}))')
+
+    modifiers_str = '\n        '.join(modifiers)
+
+    # Custom RoundedCorner shape if needed
+    rounded_corner_shape = ''
+    if 'RoundedCorner' in corner_code:
+        rounded_corner_shape = '''
+
+// Custom shape for individual corner radii
+struct RoundedCorner: Shape {
+    var topLeft: CGFloat = 0
+    var topRight: CGFloat = 0
+    var bottomRight: CGFloat = 0
+    var bottomLeft: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let w = rect.size.width
+        let h = rect.size.height
+
+        path.move(to: CGPoint(x: w / 2, y: 0))
+        path.addLine(to: CGPoint(x: w - topRight, y: 0))
+        path.addArc(center: CGPoint(x: w - topRight, y: topRight), radius: topRight, startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false)
+        path.addLine(to: CGPoint(x: w, y: h - bottomRight))
+        path.addArc(center: CGPoint(x: w - bottomRight, y: h - bottomRight), radius: bottomRight, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
+        path.addLine(to: CGPoint(x: bottomLeft, y: h))
+        path.addArc(center: CGPoint(x: bottomLeft, y: h - bottomLeft), radius: bottomLeft, startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
+        path.addLine(to: CGPoint(x: 0, y: topLeft))
+        path.addArc(center: CGPoint(x: topLeft, y: topLeft), radius: topLeft, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        path.closeSubpath()
+
+        return path
+    }
+}'''
+
     code = f'''import SwiftUI
 
-struct {component_name}: View {{
+struct {component_name}: View {{{gradient_def}
     var body: some View {{
-        {container}({spacing}) {{
+        {container}({spacing_param}) {{
 {children_code if children_code else '            // Content'}
         }}
-        .frame(width: {int(width)}, height: {int(height)})
-        {f".background({bg_color})" if bg_color else ''}
-        {f".cornerRadius({corner_radius})" if corner_radius else ''}
-        .padding(.top, {padding_top})
-        .padding(.trailing, {padding_right})
-        .padding(.bottom, {padding_bottom})
-        .padding(.leading, {padding_left})
+        {modifiers_str}
     }}
 }}
 
 #Preview {{
     {component_name}()
-}}
+}}{rounded_corner_shape}
 '''
     return code
 
@@ -1150,22 +2117,130 @@ def _generate_swiftui_children(children: List[Dict[str, Any]], indent: int = 12)
 
 
 def _generate_kotlin_code(node: Dict[str, Any], component_name: str) -> str:
-    """Generate Kotlin Jetpack Compose code from Figma node."""
+    """Generate Kotlin Jetpack Compose code from Figma node with comprehensive style support."""
     bbox = node.get('absoluteBoundingBox', {})
     width = bbox.get('width', 100)
     height = bbox.get('height', 100)
 
+    # Background (with gradient support)
     fills = node.get('fills', [])
-    bg_color = ''
-    if fills and fills[0].get('type') == 'SOLID' and fills[0].get('visible', True):
-        color = fills[0].get('color', {})
-        r = int(color.get('r', 0) * 255)
-        g = int(color.get('g', 0) * 255)
-        b = int(color.get('b', 0) * 255)
-        a = color.get('a', 1)
-        bg_color = f"Color(0x{int(a*255):02X}{r:02X}{g:02X}{b:02X})"
+    bg_code = ''
+    gradient_import = ''
+    brush_def = ''
 
+    for fill in fills:
+        if not fill.get('visible', True):
+            continue
+        fill_type = fill.get('type', '')
+
+        if fill_type == 'SOLID':
+            color = fill.get('color', {})
+            r = int(color.get('r', 0) * 255)
+            g = int(color.get('g', 0) * 255)
+            b = int(color.get('b', 0) * 255)
+            a = fill.get('opacity', color.get('a', 1))
+            bg_code = f".background(Color(0x{int(a*255):02X}{r:02X}{g:02X}{b:02X}))"
+            break
+
+        elif fill_type == 'GRADIENT_LINEAR':
+            stops = fill.get('gradientStops', [])
+            if stops:
+                gradient_import = 'import androidx.compose.ui.graphics.Brush'
+                colors = []
+                for stop in stops:
+                    c = stop.get('color', {})
+                    sr = int(c.get('r', 0) * 255)
+                    sg = int(c.get('g', 0) * 255)
+                    sb = int(c.get('b', 0) * 255)
+                    colors.append(f"Color(0xFF{sr:02X}{sg:02X}{sb:02X})")
+                brush_def = f'''    val gradientBrush = Brush.horizontalGradient(
+        colors = listOf({", ".join(colors)})
+    )
+'''
+                bg_code = '.background(gradientBrush)'
+            break
+
+        elif fill_type == 'GRADIENT_RADIAL':
+            stops = fill.get('gradientStops', [])
+            if stops:
+                gradient_import = 'import androidx.compose.ui.graphics.Brush'
+                colors = []
+                for stop in stops:
+                    c = stop.get('color', {})
+                    sr = int(c.get('r', 0) * 255)
+                    sg = int(c.get('g', 0) * 255)
+                    sb = int(c.get('b', 0) * 255)
+                    colors.append(f"Color(0xFF{sr:02X}{sg:02X}{sb:02X})")
+                brush_def = f'''    val gradientBrush = Brush.radialGradient(
+        colors = listOf({", ".join(colors)})
+    )
+'''
+                bg_code = '.background(gradientBrush)'
+            break
+
+    # Individual corner radii
+    corner_radii = node.get('rectangleCornerRadii', [])
     corner_radius = node.get('cornerRadius', 0)
+    corner_code = ''
+
+    if corner_radii and len(corner_radii) == 4:
+        tl, tr, br, bl = corner_radii
+        if tl == tr == br == bl:
+            corner_code = f'.clip(RoundedCornerShape({tl}.dp))' if tl > 0 else ''
+        else:
+            corner_code = f'.clip(RoundedCornerShape(topStart = {tl}.dp, topEnd = {tr}.dp, bottomEnd = {br}.dp, bottomStart = {bl}.dp))'
+    elif corner_radius:
+        corner_code = f'.clip(RoundedCornerShape({corner_radius}.dp))'
+
+    # Rotation
+    rotation = node.get('rotation', 0)
+    rotation_code = f'.rotate({rotation:.1f}f)' if rotation != 0 else ''
+    rotation_import = 'import androidx.compose.ui.draw.rotate' if rotation != 0 else ''
+
+    # Opacity (alpha)
+    opacity = node.get('opacity', 1)
+    alpha_code = f'.alpha({opacity:.2f}f)' if opacity < 1 else ''
+    alpha_import = 'import androidx.compose.ui.draw.alpha' if opacity < 1 else ''
+
+    # Blend mode
+    blend_mode = node.get('blendMode', 'PASS_THROUGH')
+    blend_map = {
+        'MULTIPLY': 'BlendMode.Multiply', 'SCREEN': 'BlendMode.Screen',
+        'OVERLAY': 'BlendMode.Overlay', 'DARKEN': 'BlendMode.Darken',
+        'LIGHTEN': 'BlendMode.Lighten', 'COLOR_DODGE': 'BlendMode.ColorDodge',
+        'COLOR_BURN': 'BlendMode.ColorBurn', 'SOFT_LIGHT': 'BlendMode.Softlight',
+        'HARD_LIGHT': 'BlendMode.Hardlight', 'DIFFERENCE': 'BlendMode.Difference',
+        'EXCLUSION': 'BlendMode.Exclusion'
+    }
+    blend_import = 'import androidx.compose.ui.graphics.BlendMode' if blend_mode in blend_map else ''
+
+    # Effects (shadows and blurs)
+    effects = node.get('effects', [])
+    shadow_code = ''
+    blur_code = ''
+    shadow_import = ''
+    blur_import = ''
+
+    for effect in effects:
+        if not effect.get('visible', True):
+            continue
+        effect_type = effect.get('type', '')
+
+        if effect_type == 'DROP_SHADOW' and not shadow_code:
+            color = effect.get('color', {})
+            offset_x = effect.get('offset', {}).get('x', 0)
+            offset_y = effect.get('offset', {}).get('y', 0)
+            blur = effect.get('radius', 0)
+            r = int(color.get('r', 0) * 255)
+            g = int(color.get('g', 0) * 255)
+            b = int(color.get('b', 0) * 255)
+            a = color.get('a', 0.25)
+            shadow_import = 'import androidx.compose.ui.draw.shadow'
+            shadow_code = f'.shadow(elevation = {blur}.dp, shape = RoundedCornerShape({corner_radius}.dp))'
+        elif effect_type == 'LAYER_BLUR' and not blur_code:
+            blur_import = 'import androidx.compose.ui.draw.blur'
+            blur_code = f'.blur(radius = {effect.get("radius", 0)}.dp)'
+
     layout_mode = node.get('layoutMode')
     gap = node.get('itemSpacing', 0)
     padding_top = node.get('paddingTop', 0)
@@ -1173,14 +2248,62 @@ def _generate_kotlin_code(node: Dict[str, Any], component_name: str) -> str:
     padding_bottom = node.get('paddingBottom', 0)
     padding_left = node.get('paddingLeft', 0)
 
+    # Advanced alignment
+    primary_align = node.get('primaryAxisAlignItems', 'MIN')
+    counter_align = node.get('counterAxisAlignItems', 'MIN')
+
+    align_map = {'MIN': 'Start', 'CENTER': 'CenterHorizontally', 'MAX': 'End'}
+    v_align_map = {'MIN': 'Top', 'CENTER': 'CenterVertically', 'MAX': 'Bottom'}
+
     # Determine container type
     container = 'Column' if layout_mode == 'VERTICAL' else 'Row' if layout_mode == 'HORIZONTAL' else 'Box'
 
     # Generate children
     children_code = _generate_kotlin_children(node.get('children', []))
 
-    arrangement = f"verticalArrangement = Arrangement.spacedBy({gap}.dp)" if layout_mode == 'VERTICAL' and gap else \
-                  f"horizontalArrangement = Arrangement.spacedBy({gap}.dp)" if layout_mode == 'HORIZONTAL' and gap else ''
+    # Build arrangement
+    arrangement_parts = []
+    if layout_mode == 'VERTICAL':
+        if gap:
+            arrangement_parts.append(f'verticalArrangement = Arrangement.spacedBy({gap}.dp)')
+        h_align = align_map.get(counter_align, 'Start')
+        arrangement_parts.append(f'horizontalAlignment = Alignment.{h_align}')
+    elif layout_mode == 'HORIZONTAL':
+        if gap:
+            arrangement_parts.append(f'horizontalArrangement = Arrangement.spacedBy({gap}.dp)')
+        v_align = v_align_map.get(counter_align, 'Top')
+        arrangement_parts.append(f'verticalAlignment = Alignment.{v_align}')
+
+    arrangement = ',\n        '.join(arrangement_parts) if arrangement_parts else ''
+
+    # Build modifier chain
+    modifiers = [f'.width({int(width)}.dp)', f'.height({int(height)}.dp)']
+    if shadow_code:
+        modifiers.append(shadow_code)
+    if bg_code:
+        modifiers.append(bg_code)
+    if corner_code:
+        modifiers.append(corner_code)
+    if blur_code:
+        modifiers.append(blur_code)
+    if rotation_code:
+        modifiers.append(rotation_code)
+    if alpha_code:
+        modifiers.append(alpha_code)
+    modifiers.append(f'''.padding(
+                top = {padding_top}.dp,
+                end = {padding_right}.dp,
+                bottom = {padding_bottom}.dp,
+                start = {padding_left}.dp
+            )''')
+
+    modifiers_str = '\n            '.join(modifiers)
+
+    # Collect imports
+    extra_imports = [i for i in [gradient_import, rotation_import, alpha_import, shadow_import, blur_import, blend_import] if i]
+    extra_imports_str = '\n'.join(extra_imports)
+    if extra_imports_str:
+        extra_imports_str = '\n' + extra_imports_str
 
     code = f'''package com.example.ui
 
@@ -1189,30 +2312,22 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.sp{extra_imports_str}
 
 @Composable
 fun {component_name}(
     modifier: Modifier = Modifier
 ) {{
-    {container}(
+{brush_def}    {container}(
         modifier = modifier
-            .width({int(width)}.dp)
-            .height({int(height)}.dp)
-            {f".background({bg_color})" if bg_color else ''}
-            {f".clip(RoundedCornerShape({corner_radius}.dp))" if corner_radius else ''}
-            .padding(
-                top = {padding_top}.dp,
-                end = {padding_right}.dp,
-                bottom = {padding_bottom}.dp,
-                start = {padding_left}.dp
-            ),
-        {arrangement}
+            {modifiers_str}{f''',
+        {arrangement}''' if arrangement else ''}
     ) {{
 {children_code if children_code else '        // Content'}
     }}
@@ -1282,34 +2397,53 @@ def _recursive_node_to_jsx(node: Dict[str, Any], indent: int = 6, use_tailwind: 
     width = int(bbox.get('width', 0))
     height = int(bbox.get('height', 0))
 
-    # Fills
+    # Fills (with gradient support)
     fills = node.get('fills', [])
-    bg_color = ''
-    if fills and fills[0].get('type') == 'SOLID' and fills[0].get('visible', True):
-        bg_color = _rgba_to_hex(fills[0].get('color', {}))
+    bg_value, bg_type = _get_background_css(node)
 
-    # Strokes
-    strokes = node.get('strokes', [])
+    # Strokes (comprehensive)
+    stroke_data = _extract_stroke_data(node)
     stroke_color = ''
-    stroke_weight = node.get('strokeWeight', 0)
-    if strokes and strokes[0].get('type') == 'SOLID' and strokes[0].get('visible', True):
-        stroke_color = _rgba_to_hex(strokes[0].get('color', {}))
+    stroke_weight = stroke_data['weight'] if stroke_data else 0
+    stroke_align = stroke_data['align'] if stroke_data else 'INSIDE'
+    if stroke_data and stroke_data['colors']:
+        first_stroke = stroke_data['colors'][0]
+        if first_stroke.get('type') == 'SOLID':
+            stroke_color = first_stroke.get('color', '')
 
-    # Effects (shadows)
-    effects = node.get('effects', [])
+    # Effects (shadows and blurs)
+    effects_data = _extract_effects_data(node)
     shadow_css = ''
-    for effect in effects:
-        if 'SHADOW' in effect.get('type', '') and effect.get('visible', True):
-            color = effect.get('color', {})
-            offset = effect.get('offset', {'x': 0, 'y': 0})
-            radius = effect.get('radius', 0)
-            spread = effect.get('spread', 0)
-            shadow_color = _rgba_to_hex(color)
-            shadow_css = f"{int(offset.get('x', 0))}px {int(offset.get('y', 0))}px {int(radius)}px {int(spread)}px {shadow_color}"
-            break
+    blur_css = ''
+    if effects_data['shadows']:
+        shadow_parts = []
+        for shadow in effects_data['shadows']:
+            offset = shadow.get('offset', {'x': 0, 'y': 0})
+            shadow_parts.append(
+                f"{int(offset.get('x', 0))}px {int(offset.get('y', 0))}px {int(shadow.get('radius', 0))}px {int(shadow.get('spread', 0))}px {shadow.get('color', '#000')}"
+            )
+        shadow_css = ', '.join(shadow_parts)
+    if effects_data['blurs']:
+        for blur in effects_data['blurs']:
+            if blur.get('type') == 'LAYER_BLUR':
+                blur_css = f"blur({int(blur.get('radius', 0))}px)"
+            elif blur.get('type') == 'BACKGROUND_BLUR':
+                blur_css = f"blur({int(blur.get('radius', 0))}px)"
+
+    # Corner radius (with individual corners support)
+    corner_radius_css = _corner_radii_to_css(node)
+
+    # Transform (rotation, scale)
+    transform_css = _transform_to_css(node)
+
+    # Blend mode
+    blend_mode = node.get('blendMode', 'PASS_THROUGH')
+    blend_mode_css = _blend_mode_to_css(blend_mode)
+
+    # Opacity
+    opacity = node.get('opacity', 1)
 
     # Layout
-    corner_radius = node.get('cornerRadius', 0)
     layout_mode = node.get('layoutMode')
     gap = node.get('itemSpacing', 0)
     padding_top = node.get('paddingTop', 0)
@@ -1381,32 +2515,78 @@ def _recursive_node_to_jsx(node: Dict[str, Any], indent: int = 6, use_tailwind: 
                 classes.append(f'w-[{width}px]')
             if height:
                 classes.append(f'h-[{height}px]')
-            if bg_color:
-                classes.append(f'bg-[{bg_color}]')
+            if bg_value and bg_type == 'color':
+                classes.append(f'bg-[{bg_value}]')
             class_str = ' '.join(filter(None, classes))
             lines.append(f'{prefix}{{/* Icon: {name} */}}')
             lines.append(f'{prefix}<div className="{class_str}" />')
         else:
+            styles = []
+            if width:
+                styles.append(f"width: '{width}px'")
+            if height:
+                styles.append(f"height: '{height}px'")
+            if bg_value and bg_type == 'color':
+                styles.append(f"backgroundColor: '{bg_value}'")
+            style_str = ', '.join(styles) if styles else "width: '0px'"
             lines.append(f'{prefix}{{/* Icon: {name} */}}')
-            lines.append(f'{prefix}<div style={{{{ width: "{width}px", height: "{height}px" }}}} />')
+            lines.append(f'{prefix}<div style={{{{ {style_str} }}}} />')
 
     else:
         # Container element (FRAME, GROUP, COMPONENT, INSTANCE, RECTANGLE, etc.)
         if use_tailwind:
             classes = []
+            inline_styles = []  # For properties that can't be expressed in Tailwind alone
+
             if width:
                 classes.append(f'w-[{width}px]')
             if height:
                 classes.append(f'h-[{height}px]')
-            if bg_color:
-                classes.append(f'bg-[{bg_color}]')
-            if corner_radius:
-                classes.append(f'rounded-[{corner_radius}px]')
+
+            # Background (solid color or gradient)
+            if bg_value and bg_type:
+                if bg_type == 'color':
+                    classes.append(f'bg-[{bg_value}]')
+                elif bg_type == 'gradient':
+                    # Gradients need inline style in Tailwind
+                    inline_styles.append(f"background: '{bg_value}'")
+                elif bg_type == 'image':
+                    # Image placeholder
+                    inline_styles.append(f"/* {bg_value} */")
+
+            # Corner radius (with individual corners)
+            if corner_radius_css:
+                classes.append(f'rounded-[{corner_radius_css}]')
+
+            # Strokes
             if stroke_color and stroke_weight:
                 classes.append(f'border-[{stroke_weight}px]')
                 classes.append(f'border-[{stroke_color}]')
+                # Border position (only INSIDE is default in CSS)
+                if stroke_align == 'OUTSIDE':
+                    inline_styles.append("boxSizing: 'content-box'")
+
+            # Shadows
             if shadow_css:
                 classes.append(f'shadow-[{shadow_css}]')
+
+            # Blur filter
+            if blur_css:
+                inline_styles.append(f"filter: '{blur_css}'")
+
+            # Transform (rotation, scale)
+            if transform_css:
+                inline_styles.append(f"transform: '{transform_css}'")
+
+            # Blend mode
+            if blend_mode_css:
+                classes.append(f'mix-blend-{blend_mode_css}')
+
+            # Opacity
+            if opacity < 1:
+                classes.append(f'opacity-[{opacity}]')
+
+            # Layout
             if layout_mode:
                 classes.append('flex')
                 classes.append('flex-col' if layout_mode == 'VERTICAL' else 'flex-row')
@@ -1417,6 +2597,8 @@ def _recursive_node_to_jsx(node: Dict[str, Any], indent: int = 6, use_tailwind: 
                 items_map = {'MIN': 'items-start', 'CENTER': 'items-center', 'MAX': 'items-end'}
                 classes.append(justify_map.get(primary_align, ''))
                 classes.append(items_map.get(counter_align, ''))
+
+            # Padding
             if padding_top or padding_right or padding_bottom or padding_left:
                 if padding_top:
                     classes.append(f'pt-[{padding_top}px]')
@@ -1428,21 +2610,60 @@ def _recursive_node_to_jsx(node: Dict[str, Any], indent: int = 6, use_tailwind: 
                     classes.append(f'pl-[{padding_left}px]')
 
             class_str = ' '.join(filter(None, classes))
-            lines.append(f'{prefix}<div className="{class_str}">')
+
+            # Combine className and style if needed
+            if inline_styles:
+                style_str = ', '.join(inline_styles)
+                lines.append(f'{prefix}<div className="{class_str}" style={{{{ {style_str} }}}}>')
+            else:
+                lines.append(f'{prefix}<div className="{class_str}">')
         else:
             styles = []
             if width:
                 styles.append(f"width: '{width}px'")
             if height:
                 styles.append(f"height: '{height}px'")
-            if bg_color:
-                styles.append(f"backgroundColor: '{bg_color}'")
-            if corner_radius:
-                styles.append(f"borderRadius: '{corner_radius}px'")
+
+            # Background (solid color or gradient)
+            if bg_value and bg_type:
+                if bg_type == 'color':
+                    styles.append(f"backgroundColor: '{bg_value}'")
+                elif bg_type == 'gradient':
+                    styles.append(f"background: '{bg_value}'")
+                elif bg_type == 'image':
+                    styles.append(f"/* {bg_value} */")
+
+            # Corner radius (with individual corners)
+            if corner_radius_css:
+                styles.append(f"borderRadius: '{corner_radius_css}'")
+
+            # Strokes
             if stroke_color and stroke_weight:
                 styles.append(f"border: '{stroke_weight}px solid {stroke_color}'")
+                if stroke_align == 'OUTSIDE':
+                    styles.append("boxSizing: 'content-box'")
+
+            # Shadows
             if shadow_css:
                 styles.append(f"boxShadow: '{shadow_css}'")
+
+            # Blur filter
+            if blur_css:
+                styles.append(f"filter: '{blur_css}'")
+
+            # Transform (rotation, scale)
+            if transform_css:
+                styles.append(f"transform: '{transform_css}'")
+
+            # Blend mode
+            if blend_mode_css:
+                styles.append(f"mixBlendMode: '{blend_mode_css}'")
+
+            # Opacity
+            if opacity < 1:
+                styles.append(f"opacity: {opacity}")
+
+            # Layout
             if layout_mode:
                 styles.append("display: 'flex'")
                 styles.append(f"flexDirection: '{'column' if layout_mode == 'VERTICAL' else 'row'}'")
@@ -1453,6 +2674,8 @@ def _recursive_node_to_jsx(node: Dict[str, Any], indent: int = 6, use_tailwind: 
                 items_map = {'MIN': 'flex-start', 'CENTER': 'center', 'MAX': 'flex-end'}
                 styles.append(f"justifyContent: '{justify_map.get(primary_align, 'flex-start')}'")
                 styles.append(f"alignItems: '{items_map.get(counter_align, 'flex-start')}'")
+
+            # Padding
             if padding_top or padding_right or padding_bottom or padding_left:
                 styles.append(f"padding: '{padding_top}px {padding_right}px {padding_bottom}px {padding_left}px'")
 
@@ -1570,10 +2793,20 @@ async def figma_get_file_structure(params: FigmaFileInput) -> str:
 )
 async def figma_get_node_details(params: FigmaNodeInput) -> str:
     """
-    Get detailed information about a specific node in a Figma file.
+    Get comprehensive details about a specific node in a Figma file.
 
-    Retrieves comprehensive details including styles, fills, strokes,
-    effects, and layout properties for a specific node.
+    Retrieves all design properties including:
+    - Dimensions and position
+    - Fills (solid, gradient, image)
+    - Strokes (color, weight, align, cap, join, dashes)
+    - Effects (shadows, blurs)
+    - Auto-layout properties
+    - Corner radii (individual corners)
+    - Constraints (responsive behavior)
+    - Transform (rotation, scale)
+    - Component/Instance info
+    - Bound variables
+    - Blend mode
 
     Args:
         params: FigmaNodeInput containing:
@@ -1582,7 +2815,7 @@ async def figma_get_node_details(params: FigmaNodeInput) -> str:
             - response_format: 'markdown' or 'json'
 
     Returns:
-        str: Node details in requested format
+        str: Comprehensive node details in requested format
     """
     try:
         data = await _make_figma_request(
@@ -1597,88 +2830,344 @@ async def figma_get_node_details(params: FigmaNodeInput) -> str:
         if not node:
             return f"Error: Node '{params.node_id}' not found in file."
 
-        if params.response_format == ResponseFormat.JSON:
-            return json.dumps(node, indent=2)
-
-        # Markdown format
-        lines = [
-            f"# Node: {node.get('name', 'Unknown')}",
-            f"**ID:** `{params.node_id}`",
-            f"**Type:** {node.get('type')}",
-            ""
-        ]
+        # Build comprehensive node details
+        node_details = {
+            'id': params.node_id,
+            'name': node.get('name', 'Unknown'),
+            'type': node.get('type'),
+            'visible': node.get('visible', True),
+            'locked': node.get('locked', False)
+        }
 
         # Bounds
         bbox = node.get('absoluteBoundingBox', {})
         if bbox:
+            node_details['bounds'] = {
+                'width': round(bbox.get('width', 0), 2),
+                'height': round(bbox.get('height', 0), 2),
+                'x': round(bbox.get('x', 0), 2),
+                'y': round(bbox.get('y', 0), 2)
+            }
+
+        # Blend mode
+        if 'blendMode' in node:
+            node_details['blendMode'] = node['blendMode']
+
+        # Opacity
+        if 'opacity' in node:
+            node_details['opacity'] = node['opacity']
+
+        # Fills (with gradient and image support)
+        fills = node.get('fills', [])
+        if fills:
+            node_details['fills'] = []
+            for fill in fills:
+                fill_data = _extract_fill_data(fill, node.get('name', ''))
+                if fill_data:
+                    # Remove 'name' and 'category' for cleaner output
+                    fill_data.pop('name', None)
+                    fill_data.pop('category', None)
+                    node_details['fills'].append(fill_data)
+
+        # Strokes (comprehensive)
+        stroke_data = _extract_stroke_data(node)
+        if stroke_data:
+            node_details['strokes'] = stroke_data
+
+        # Corner radii (individual corners)
+        corner_radii = _extract_corner_radii(node)
+        if corner_radii:
+            node_details['cornerRadius'] = corner_radii
+
+        # Effects (shadows and blurs)
+        effects_data = _extract_effects_data(node)
+        if effects_data['shadows'] or effects_data['blurs']:
+            node_details['effects'] = {
+                k: v for k, v in effects_data.items() if v
+            }
+
+        # Auto-layout (comprehensive)
+        auto_layout = _extract_auto_layout(node)
+        if auto_layout:
+            node_details['autoLayout'] = auto_layout
+
+        # Size constraints
+        size_constraints = _extract_size_constraints(node)
+        if size_constraints:
+            node_details['sizeConstraints'] = size_constraints
+
+        # Layout constraints (responsive)
+        constraints = _extract_constraints(node)
+        if constraints:
+            node_details['constraints'] = constraints
+
+        # Transform
+        transform = _extract_transform(node)
+        if transform.get('rotation') or transform.get('preserveRatio'):
+            node_details['transform'] = transform
+
+        # Clip content
+        if 'clipsContent' in node:
+            node_details['clipsContent'] = node['clipsContent']
+
+        # Component/Instance info
+        component_info = _extract_component_info(node)
+        if component_info:
+            node_details['component'] = component_info
+
+        # Bound variables
+        bound_variables = _extract_bound_variables(node)
+        if bound_variables:
+            node_details['boundVariables'] = bound_variables
+
+        # Text-specific properties
+        if node.get('type') == 'TEXT':
+            style = node.get('style', {})
+            node_details['text'] = {
+                'characters': node.get('characters', ''),
+                'fontFamily': style.get('fontFamily'),
+                'fontSize': style.get('fontSize'),
+                'fontWeight': style.get('fontWeight'),
+                'fontStyle': 'italic' if style.get('italic') else 'normal',
+                'lineHeight': style.get('lineHeightPx'),
+                'lineHeightUnit': style.get('lineHeightUnit'),
+                'letterSpacing': style.get('letterSpacing'),
+                'textAlign': style.get('textAlignHorizontal'),
+                'textAlignVertical': style.get('textAlignVertical'),
+                'textCase': style.get('textCase'),
+                'textDecoration': style.get('textDecoration'),
+                'paragraphSpacing': style.get('paragraphSpacing'),
+                'paragraphIndent': style.get('paragraphIndent'),
+                'textAutoResize': node.get('textAutoResize'),
+                'textTruncation': node.get('textTruncation'),
+                'maxLines': node.get('maxLines'),
+                'hyperlink': node.get('hyperlink')
+            }
+            # Clean up None values
+            node_details['text'] = {k: v for k, v in node_details['text'].items() if v is not None}
+
+        # Children count
+        children = node.get('children', [])
+        if children:
+            node_details['childrenCount'] = len(children)
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(node_details, indent=2)
+
+        # Markdown format
+        lines = [
+            f"# Node: {node_details['name']}",
+            f"**ID:** `{node_details['id']}`",
+            f"**Type:** {node_details['type']}",
+            ""
+        ]
+
+        # Visibility/Lock status
+        if not node_details.get('visible', True):
+            lines.append("⚠️ **This node is hidden**\n")
+        if node_details.get('locked', False):
+            lines.append("🔒 **This node is locked**\n")
+
+        # Bounds
+        if 'bounds' in node_details:
+            b = node_details['bounds']
             lines.extend([
                 "## Dimensions",
-                f"- **Width:** {bbox.get('width', 0):.0f}px",
-                f"- **Height:** {bbox.get('height', 0):.0f}px",
-                f"- **Position:** ({bbox.get('x', 0):.0f}, {bbox.get('y', 0):.0f})",
+                f"- **Width:** {b['width']}px",
+                f"- **Height:** {b['height']}px",
+                f"- **Position:** ({b['x']}, {b['y']})",
                 ""
             ])
 
+        # Blend mode & Opacity
+        if 'blendMode' in node_details or 'opacity' in node_details:
+            lines.append("## Appearance")
+            if 'blendMode' in node_details:
+                lines.append(f"- **Blend Mode:** {node_details['blendMode']}")
+            if 'opacity' in node_details:
+                lines.append(f"- **Opacity:** {node_details['opacity']}")
+            lines.append("")
+
         # Fills
-        fills = node.get('fills', [])
-        if fills:
+        if 'fills' in node_details:
             lines.append("## Fills")
-            for fill in fills:
-                if fill.get('type') == 'SOLID':
-                    color = fill.get('color', {})
-                    lines.append(f"- {_rgba_to_hex(color)} (opacity: {fill.get('opacity', 1):.2f})")
-                elif fill.get('type') == 'GRADIENT_LINEAR':
-                    lines.append(f"- Linear gradient")
+            for fill in node_details['fills']:
+                fill_type = fill.get('fillType', 'SOLID')
+                if fill_type == 'SOLID':
+                    lines.append(f"- **Solid:** {fill.get('color')} (opacity: {fill.get('opacity', 1):.2f})")
+                elif fill_type.startswith('GRADIENT_'):
+                    gradient = fill.get('gradient', {})
+                    stops = gradient.get('stops', [])
+                    gradient_type = gradient.get('type', 'LINEAR')
+                    angle = gradient.get('angle', 0)
+                    colors = ' → '.join([s['color'] for s in stops[:3]])
+                    if len(stops) > 3:
+                        colors += f" (+{len(stops)-3} more)"
+                    lines.append(f"- **{gradient_type} Gradient:** {colors}")
+                    if gradient_type == 'LINEAR':
+                        lines.append(f"  - Angle: {angle}°")
+                elif fill_type == 'IMAGE':
+                    image = fill.get('image', {})
+                    lines.append(f"- **Image:** ref={image.get('imageRef')}, scale={image.get('scaleMode')}")
             lines.append("")
 
         # Strokes
-        strokes = node.get('strokes', [])
-        if strokes:
+        if 'strokes' in node_details:
+            s = node_details['strokes']
             lines.append("## Strokes")
-            stroke_weight = node.get('strokeWeight', 1)
-            for stroke in strokes:
-                if stroke.get('type') == 'SOLID':
-                    color = stroke.get('color', {})
-                    lines.append(f"- {_rgba_to_hex(color)} ({stroke_weight}px)")
+            lines.append(f"- **Weight:** {s['weight']}px")
+            lines.append(f"- **Align:** {s['align']}")
+            lines.append(f"- **Cap:** {s['cap']}, **Join:** {s['join']}")
+            if s.get('dashes'):
+                lines.append(f"- **Dashes:** {s['dashes']}")
+            for color in s.get('colors', []):
+                if color.get('type') == 'SOLID':
+                    lines.append(f"- **Color:** {color.get('color')}")
+                elif color.get('type', '').startswith('GRADIENT_'):
+                    lines.append(f"- **Gradient stroke**")
             lines.append("")
 
-        # Effects (shadows, blur)
-        effects = node.get('effects', [])
-        if effects:
+        # Corner radius
+        if 'cornerRadius' in node_details:
+            cr = node_details['cornerRadius']
+            if cr.get('isUniform'):
+                lines.append(f"## Border Radius: {cr['topLeft']}px\n")
+            else:
+                lines.extend([
+                    "## Border Radius",
+                    f"- **Top Left:** {cr['topLeft']}px",
+                    f"- **Top Right:** {cr['topRight']}px",
+                    f"- **Bottom Right:** {cr['bottomRight']}px",
+                    f"- **Bottom Left:** {cr['bottomLeft']}px",
+                    ""
+                ])
+
+        # Effects
+        if 'effects' in node_details:
             lines.append("## Effects")
-            for effect in effects:
-                effect_type = effect.get('type', '')
-                if 'SHADOW' in effect_type:
-                    color = effect.get('color', {})
-                    offset = effect.get('offset', {})
-                    radius = effect.get('radius', 0)
+            if node_details['effects'].get('shadows'):
+                for shadow in node_details['effects']['shadows']:
+                    offset = shadow['offset']
                     lines.append(
-                        f"- Shadow: {_rgba_to_hex(color)}, "
-                        f"offset ({offset.get('x', 0)}, {offset.get('y', 0)}), "
-                        f"blur {radius}px"
+                        f"- **{shadow['type']}:** {shadow['color']}, "
+                        f"offset ({offset['x']}, {offset['y']}), "
+                        f"blur {shadow['radius']}px, spread {shadow['spread']}px"
                     )
-                elif effect_type == 'LAYER_BLUR':
-                    lines.append(f"- Blur: {effect.get('radius', 0)}px")
+            if node_details['effects'].get('blurs'):
+                for blur in node_details['effects']['blurs']:
+                    lines.append(f"- **{blur['type']}:** {blur['radius']}px")
             lines.append("")
 
         # Auto-layout
-        if node.get('layoutMode'):
+        if 'autoLayout' in node_details:
+            al = node_details['autoLayout']
             lines.extend([
                 "## Auto Layout",
-                f"- **Mode:** {node.get('layoutMode')}",
-                f"- **Padding:** {node.get('paddingTop', 0)} {node.get('paddingRight', 0)} {node.get('paddingBottom', 0)} {node.get('paddingLeft', 0)}",
-                f"- **Item Spacing:** {node.get('itemSpacing', 0)}",
+                f"- **Direction:** {al['mode']}",
+                f"- **Gap:** {al['gap']}px",
+                f"- **Padding:** T:{al['padding']['top']} R:{al['padding']['right']} B:{al['padding']['bottom']} L:{al['padding']['left']}",
+                f"- **Primary Align:** {al['primaryAxisAlign']}",
+                f"- **Counter Align:** {al['counterAxisAlign']}",
+                f"- **Primary Sizing:** {al['primaryAxisSizing']}",
+                f"- **Counter Sizing:** {al['counterAxisSizing']}",
+            ])
+            if al.get('layoutWrap') != 'NO_WRAP':
+                lines.append(f"- **Wrap:** {al['layoutWrap']}")
+            lines.append("")
+
+        # Constraints
+        if 'constraints' in node_details:
+            c = node_details['constraints']
+            lines.extend([
+                "## Constraints (Responsive)",
+                f"- **Horizontal:** {c['horizontal']}",
+                f"- **Vertical:** {c['vertical']}",
                 ""
             ])
 
-        # Corner radius
-        corner_radius = node.get('cornerRadius')
-        if corner_radius:
-            lines.extend([
-                "## Border Radius",
-                f"- **Radius:** {corner_radius}px",
-                ""
-            ])
+        # Size constraints
+        if 'sizeConstraints' in node_details:
+            sc = node_details['sizeConstraints']
+            lines.append("## Size Constraints")
+            if 'minWidth' in sc:
+                lines.append(f"- **Min Width:** {sc['minWidth']}px")
+            if 'maxWidth' in sc:
+                lines.append(f"- **Max Width:** {sc['maxWidth']}px")
+            if 'minHeight' in sc:
+                lines.append(f"- **Min Height:** {sc['minHeight']}px")
+            if 'maxHeight' in sc:
+                lines.append(f"- **Max Height:** {sc['maxHeight']}px")
+            lines.append("")
+
+        # Transform
+        if 'transform' in node_details:
+            t = node_details['transform']
+            lines.append("## Transform")
+            if t.get('rotation'):
+                lines.append(f"- **Rotation:** {t['rotation']}°")
+            if t.get('preserveRatio'):
+                lines.append(f"- **Preserve Ratio:** Yes")
+            lines.append("")
+
+        # Clip content
+        if 'clipsContent' in node_details:
+            lines.append(f"## Clip Content: {'Yes' if node_details['clipsContent'] else 'No'}\n")
+
+        # Component info
+        if 'component' in node_details:
+            comp = node_details['component']
+            lines.append("## Component Info")
+            if comp.get('isInstance'):
+                lines.append(f"- **Type:** Instance")
+                lines.append(f"- **Component ID:** {comp.get('componentId')}")
+                if comp.get('componentProperties'):
+                    lines.append(f"- **Properties:** {json.dumps(comp['componentProperties'], indent=2)}")
+            elif comp.get('isComponent'):
+                lines.append(f"- **Type:** Component")
+                if comp.get('componentSetId'):
+                    lines.append(f"- **Component Set ID:** {comp['componentSetId']}")
+            elif comp.get('isComponentSet'):
+                lines.append(f"- **Type:** Component Set")
+            lines.append("")
+
+        # Bound variables
+        if 'boundVariables' in node_details:
+            lines.append("## Bound Variables")
+            for prop, var in node_details['boundVariables'].items():
+                if isinstance(var, list):
+                    lines.append(f"- **{prop}:** {len(var)} variable(s) bound")
+                else:
+                    lines.append(f"- **{prop}:** {var.get('variableId')}")
+            lines.append("")
+
+        # Text properties
+        if 'text' in node_details:
+            txt = node_details['text']
+            lines.append("## Text Properties")
+            if txt.get('characters'):
+                preview = txt['characters'][:50] + '...' if len(txt.get('characters', '')) > 50 else txt['characters']
+                lines.append(f"- **Content:** \"{preview}\"")
+            if txt.get('fontFamily'):
+                lines.append(f"- **Font:** {txt['fontFamily']} {txt.get('fontWeight', 400)}")
+            if txt.get('fontSize'):
+                lines.append(f"- **Size:** {txt['fontSize']}px")
+            if txt.get('lineHeight'):
+                lines.append(f"- **Line Height:** {txt['lineHeight']}px")
+            if txt.get('letterSpacing'):
+                lines.append(f"- **Letter Spacing:** {txt['letterSpacing']}px")
+            if txt.get('textAlign'):
+                lines.append(f"- **Alignment:** {txt['textAlign']} / {txt.get('textAlignVertical', 'TOP')}")
+            if txt.get('textCase') and txt['textCase'] != 'ORIGINAL':
+                lines.append(f"- **Text Case:** {txt['textCase']}")
+            if txt.get('textDecoration') and txt['textDecoration'] != 'NONE':
+                lines.append(f"- **Decoration:** {txt['textDecoration']}")
+            if txt.get('textAutoResize'):
+                lines.append(f"- **Auto Resize:** {txt['textAutoResize']}")
+            lines.append("")
+
+        # Children count
+        if 'childrenCount' in node_details:
+            lines.append(f"**Children:** {node_details['childrenCount']} child node(s)")
 
         return "\n".join(lines)
 
@@ -1821,6 +3310,30 @@ async def figma_get_design_tokens(params: FigmaDesignTokensInput) -> str:
             # Filter to only auto-layout items
             tokens['spacing'] = [s for s in spacing if s.get('type') == 'auto-layout']
 
+        # Extract effects (shadows, blurs)
+        if params.include_effects:
+            shadows: List[Dict[str, Any]] = []
+            _extract_shadows_from_node(node, shadows)
+            # Separate shadows and blurs
+            shadow_tokens = [s for s in shadows if 'SHADOW' in s.get('type', '')]
+            blur_tokens = [s for s in shadows if 'BLUR' in s.get('type', '')]
+
+            # Deduplicate shadows by value
+            unique_shadows = {}
+            for s in shadow_tokens:
+                key = f"{s.get('color', '')}-{s.get('offsetX', 0)}-{s.get('offsetY', 0)}-{s.get('blur', 0)}"
+                if key not in unique_shadows:
+                    unique_shadows[key] = s
+            tokens['shadows'] = list(unique_shadows.values())
+
+            # Deduplicate blurs by value
+            unique_blurs = {}
+            for b in blur_tokens:
+                key = f"{b.get('type', '')}-{b.get('radius', 0)}"
+                if key not in unique_blurs:
+                    unique_blurs[key] = b
+            tokens['blurs'] = list(unique_blurs.values())
+
         # Format as design token standard
         formatted_tokens = {
             '$schema': 'https://design-tokens.github.io/community-group/format/',
@@ -1837,6 +3350,233 @@ async def figma_get_design_tokens(params: FigmaDesignTokensInput) -> str:
                 'message': f'Result exceeded {CHARACTER_LIMIT} characters. Try specifying a node_id to narrow scope.',
                 'tokens': {k: v[:10] for k, v in tokens.items()} if tokens else {}
             }, indent=2)
+
+        return result
+
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="figma_get_styles",
+    annotations={
+        "title": "Get Published Styles",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def figma_get_styles(params: FigmaStylesInput) -> str:
+    """
+    Retrieve all published styles from a Figma file.
+
+    Fetches published color styles, text styles, effect styles, and grid styles
+    from the file. These are reusable design tokens defined in Figma.
+
+    Args:
+        params: FigmaStylesInput containing:
+            - file_key (str): Figma file key
+            - include_fill_styles (bool): Include fill/color styles
+            - include_text_styles (bool): Include text/typography styles
+            - include_effect_styles (bool): Include effect styles
+            - include_grid_styles (bool): Include grid/layout styles
+            - response_format: 'markdown' or 'json'
+
+    Returns:
+        str: Published styles in requested format
+    """
+    try:
+        # Fetch styles from the file styles endpoint
+        data = await _make_figma_request(f"files/{params.file_key}/styles")
+
+        styles = data.get('meta', {}).get('styles', [])
+
+        if not styles:
+            return "No published styles found in this file."
+
+        # Categorize styles
+        fill_styles = []
+        text_styles = []
+        effect_styles = []
+        grid_styles = []
+
+        for style in styles:
+            style_type = style.get('style_type', '')
+            style_data = {
+                'key': style.get('key', ''),
+                'name': style.get('name', ''),
+                'description': style.get('description', ''),
+                'node_id': style.get('node_id', ''),
+                'created_at': style.get('created_at', ''),
+                'updated_at': style.get('updated_at', ''),
+                'sort_position': style.get('sort_position', '')
+            }
+
+            if style_type == 'FILL' and params.include_fill_styles:
+                fill_styles.append(style_data)
+            elif style_type == 'TEXT' and params.include_text_styles:
+                text_styles.append(style_data)
+            elif style_type == 'EFFECT' and params.include_effect_styles:
+                effect_styles.append(style_data)
+            elif style_type == 'GRID' and params.include_grid_styles:
+                grid_styles.append(style_data)
+
+        # Now fetch full file to get style details
+        file_data = await _make_figma_request(f"files/{params.file_key}")
+
+        # Extract style definitions from document styles
+        doc_styles = file_data.get('styles', {})
+
+        # Enrich styles with actual values
+        def enrich_style(style_data: Dict, doc_styles: Dict, file_data: Dict) -> Dict:
+            node_id = style_data.get('node_id', '')
+            if node_id and node_id in doc_styles:
+                style_info = doc_styles[node_id]
+                style_data['styleType'] = style_info.get('styleType', '')
+
+            # Try to get the actual node to extract values
+            node = _find_node_by_id(file_data.get('document', {}), node_id)
+            if node:
+                # Extract fill details
+                if node.get('fills'):
+                    fills_data = []
+                    for fill in node.get('fills', []):
+                        fill_info = _extract_fill_data(fill, style_data.get('name', ''))
+                        if fill_info:
+                            fills_data.append(fill_info)
+                    if fills_data:
+                        style_data['fills'] = fills_data
+
+                # Extract text style details
+                if node.get('style'):
+                    style_data['textStyle'] = {
+                        'fontFamily': node['style'].get('fontFamily'),
+                        'fontWeight': node['style'].get('fontWeight'),
+                        'fontSize': node['style'].get('fontSize'),
+                        'lineHeightPx': node['style'].get('lineHeightPx'),
+                        'letterSpacing': node['style'].get('letterSpacing'),
+                        'textCase': node['style'].get('textCase'),
+                        'textDecoration': node['style'].get('textDecoration')
+                    }
+
+                # Extract effect details
+                if node.get('effects'):
+                    effects_data = _extract_effects_data(node)
+                    style_data['effects'] = effects_data
+
+            return style_data
+
+        # Enrich all styles
+        fill_styles = [enrich_style(s, doc_styles, file_data) for s in fill_styles]
+        text_styles = [enrich_style(s, doc_styles, file_data) for s in text_styles]
+        effect_styles = [enrich_style(s, doc_styles, file_data) for s in effect_styles]
+        grid_styles = [enrich_style(s, doc_styles, file_data) for s in grid_styles]
+
+        # Format output
+        if params.response_format == ResponseFormat.JSON:
+            result = {
+                'file_key': params.file_key,
+                'total_styles': len(styles),
+                'fill_styles': fill_styles if params.include_fill_styles else [],
+                'text_styles': text_styles if params.include_text_styles else [],
+                'effect_styles': effect_styles if params.include_effect_styles else [],
+                'grid_styles': grid_styles if params.include_grid_styles else []
+            }
+            return json.dumps(result, indent=2)
+
+        # Markdown format
+        lines = [
+            "# Published Styles",
+            f"**File:** `{params.file_key}`",
+            f"**Total Styles:** {len(styles)}",
+            ""
+        ]
+
+        if fill_styles:
+            lines.append("## 🎨 Fill/Color Styles")
+            lines.append("")
+            for style in fill_styles:
+                lines.append(f"### {style['name']}")
+                if style.get('description'):
+                    lines.append(f"*{style['description']}*")
+                if style.get('fills'):
+                    for fill in style['fills']:
+                        if fill.get('fillType') == 'SOLID':
+                            lines.append(f"- **Color:** `{fill.get('color', 'N/A')}`")
+                            if fill.get('opacity') is not None and fill['opacity'] < 1:
+                                lines.append(f"- **Opacity:** {fill['opacity']}")
+                        elif 'GRADIENT' in fill.get('fillType', ''):
+                            lines.append(f"- **Type:** {fill['fillType']}")
+                            if fill.get('gradient'):
+                                grad = fill['gradient']
+                                lines.append(f"- **Angle:** {grad.get('angle', 0)}°")
+                                stops = grad.get('stops', [])
+                                if stops:
+                                    stop_str = ', '.join([f"{s['color']} at {int(s['position']*100)}%" for s in stops])
+                                    lines.append(f"- **Stops:** {stop_str}")
+                lines.append(f"- **Key:** `{style['key']}`")
+                lines.append("")
+
+        if text_styles:
+            lines.append("## 📝 Text Styles")
+            lines.append("")
+            for style in text_styles:
+                lines.append(f"### {style['name']}")
+                if style.get('description'):
+                    lines.append(f"*{style['description']}*")
+                if style.get('textStyle'):
+                    ts = style['textStyle']
+                    if ts.get('fontFamily'):
+                        lines.append(f"- **Font:** {ts['fontFamily']}")
+                    if ts.get('fontWeight'):
+                        lines.append(f"- **Weight:** {ts['fontWeight']}")
+                    if ts.get('fontSize'):
+                        lines.append(f"- **Size:** {ts['fontSize']}px")
+                    if ts.get('lineHeightPx'):
+                        lines.append(f"- **Line Height:** {ts['lineHeightPx']}px")
+                    if ts.get('letterSpacing'):
+                        lines.append(f"- **Letter Spacing:** {ts['letterSpacing']}")
+                    if ts.get('textCase') and ts['textCase'] != 'ORIGINAL':
+                        lines.append(f"- **Case:** {ts['textCase']}")
+                    if ts.get('textDecoration') and ts['textDecoration'] != 'NONE':
+                        lines.append(f"- **Decoration:** {ts['textDecoration']}")
+                lines.append(f"- **Key:** `{style['key']}`")
+                lines.append("")
+
+        if effect_styles:
+            lines.append("## ✨ Effect Styles")
+            lines.append("")
+            for style in effect_styles:
+                lines.append(f"### {style['name']}")
+                if style.get('description'):
+                    lines.append(f"*{style['description']}*")
+                if style.get('effects'):
+                    effects = style['effects']
+                    if effects.get('shadows'):
+                        for shadow in effects['shadows']:
+                            shadow_type = shadow.get('type', 'DROP_SHADOW')
+                            lines.append(f"- **{shadow_type}:** {shadow.get('color', 'N/A')} offset({shadow.get('offsetX', 0)}, {shadow.get('offsetY', 0)}) blur({shadow.get('blur', 0)})")
+                    if effects.get('blurs'):
+                        for blur in effects['blurs']:
+                            lines.append(f"- **{blur.get('type', 'BLUR')}:** radius {blur.get('radius', 0)}px")
+                lines.append(f"- **Key:** `{style['key']}`")
+                lines.append("")
+
+        if grid_styles:
+            lines.append("## 📐 Grid Styles")
+            lines.append("")
+            for style in grid_styles:
+                lines.append(f"### {style['name']}")
+                if style.get('description'):
+                    lines.append(f"*{style['description']}*")
+                lines.append(f"- **Key:** `{style['key']}`")
+                lines.append("")
+
+        result = "\n".join(lines)
+
+        if len(result) > CHARACTER_LIMIT:
+            return result[:CHARACTER_LIMIT] + "\n\n... (truncated)"
 
         return result
 

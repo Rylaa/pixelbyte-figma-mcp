@@ -10,9 +10,11 @@ A powerful **Model Context Protocol (MCP)** server for seamless Figma API integr
 
 | Feature | Description |
 |---------|-------------|
-| 🛠️ **11 MCP Tools** | Complete Figma integration toolkit |
+| 🛠️ **12 MCP Tools** | Complete Figma integration toolkit |
 | 💻 **10 Code Frameworks** | React, Vue, Tailwind, CSS, SCSS, SwiftUI, Kotlin |
 | 🎨 **Design Tokens** | Extract colors, typography, spacing, effects |
+| 🌈 **Gradient Support** | Linear, radial, angular, diamond gradients |
+| 🔄 **Transform & Effects** | Rotation, blend modes, shadows, blurs |
 | 🌳 **Nested Children** | Full component tree with all styles preserved |
 | 📸 **Screenshot Export** | PNG, SVG, JPG, PDF formats with scale control |
 | 🔗 **Code Connect** | Map Figma components to code implementations |
@@ -109,6 +111,7 @@ pixelbyte-figma-mcp --help
 | `figma_get_colors` | Extract fill, stroke, shadow colors | `file_key`, `node_id`, `include_*` flags |
 | `figma_get_typography` | Extract font styles | `file_key`, `node_id` |
 | `figma_get_spacing` | Extract padding and gap values | `file_key`, `node_id` |
+| `figma_get_styles` | Get published styles from file | `file_key`, `include_*` flags |
 
 ### Code Generation Tools
 
@@ -128,7 +131,24 @@ pixelbyte-figma-mcp --help
 
 ## 💻 Code Generation
 
-Generate production-ready code for **10 frameworks** with full nested children and styles.
+Generate production-ready code for **10 frameworks** with comprehensive style support.
+
+### Supported Styles
+
+| Style Feature | CSS/SCSS | React/Vue | SwiftUI | Kotlin |
+|---------------|----------|-----------|---------|--------|
+| Solid Colors | ✅ | ✅ | ✅ | ✅ |
+| Linear Gradients | ✅ | ✅ | ✅ | ✅ |
+| Radial Gradients | ✅ | ✅ | ✅ | ✅ |
+| Individual Corner Radii | ✅ | ✅ | ✅ | ✅ |
+| Rotation/Transform | ✅ | ✅ | ✅ | ✅ |
+| Blend Modes | ✅ | ✅ | ✅ | ✅ |
+| Opacity | ✅ | ✅ | ✅ | ✅ |
+| Drop Shadows | ✅ | ✅ | ✅ | ✅ |
+| Inner Shadows | ✅ | ✅ | - | - |
+| Layer Blur | ✅ | ✅ | ✅ | ✅ |
+| Background Blur | ✅ | ✅ | - | - |
+| Auto Layout | ✅ | ✅ | ✅ | ✅ |
 
 ### Supported Frameworks
 
@@ -171,13 +191,36 @@ figma_generate_code(
 )
 ```
 
+### Generated Code Example
+
+**Input:** A Figma button with gradient, shadow, and rounded corners
+
+**Output (CSS):**
+```css
+.hero-button {
+  width: 200px;
+  height: 48px;
+  background: linear-gradient(90deg, #3B82F6 0%, #8B5CF6 100%);
+  border-radius: 8px 8px 16px 16px;
+  box-shadow: 0px 4px 12px 0px rgba(59, 130, 246, 0.40);
+  transform: rotate(0deg);
+  opacity: 1;
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+}
+```
+
 ---
 
 ## 🎨 Design Token Extraction
 
 Extract design tokens in a structured format for your design system.
 
-### Colors
+### Colors (with Gradient Support)
 
 ```python
 figma_get_colors(
@@ -193,14 +236,33 @@ figma_get_colors(
 ```json
 {
   "fills": [
-    {"hex": "#3B82F6", "rgba": "rgba(59, 130, 246, 1)", "name": "primary-500"}
+    {
+      "name": "Button Background",
+      "type": "fill",
+      "fillType": "GRADIENT_LINEAR",
+      "gradient": {
+        "type": "LINEAR",
+        "angle": 90,
+        "stops": [
+          {"position": 0, "color": "#3B82F6", "opacity": 1},
+          {"position": 1, "color": "#8B5CF6", "opacity": 1}
+        ]
+      }
+    },
+    {
+      "name": "Card Background",
+      "type": "fill",
+      "fillType": "SOLID",
+      "color": "#FFFFFF",
+      "opacity": 1
+    }
   ],
   "strokes": [...],
   "shadows": [...]
 }
 ```
 
-### Typography
+### Typography (Enhanced)
 
 ```python
 figma_get_typography(
@@ -218,7 +280,11 @@ figma_get_typography(
       "fontSize": 16,
       "fontWeight": 500,
       "lineHeight": 24,
-      "letterSpacing": 0
+      "letterSpacing": 0,
+      "textCase": "ORIGINAL",
+      "textDecoration": "NONE",
+      "textAlign": "CENTER",
+      "paragraphSpacing": 0
     }
   ],
   "summary": {
@@ -229,7 +295,7 @@ figma_get_typography(
 }
 ```
 
-### Spacing
+### Spacing (with Advanced Layout)
 
 ```python
 figma_get_spacing(
@@ -246,13 +312,84 @@ figma_get_spacing(
       "name": "Card",
       "padding": {"top": 24, "right": 24, "bottom": 24, "left": 24},
       "gap": 16,
-      "layoutMode": "VERTICAL"
+      "layoutMode": "VERTICAL",
+      "primaryAxisAlign": "CENTER",
+      "counterAxisAlign": "CENTER",
+      "layoutWrap": "NO_WRAP"
     }
   ],
   "summary": {
     "uniquePaddingValues": [8, 12, 16, 24, 32],
     "uniqueGapValues": [8, 12, 16, 24]
   }
+}
+```
+
+### Effects (Shadows & Blurs)
+
+```python
+figma_get_design_tokens(
+    file_key="qyFsYyLyBsutXGGzZ9PLCp",
+    node_id="1707:6176",
+    include_effects=True
+)
+```
+
+**Output:**
+```json
+{
+  "shadows": [
+    {
+      "name": "Card Shadow",
+      "type": "DROP_SHADOW",
+      "color": "rgba(0, 0, 0, 0.1)",
+      "offset": {"x": 0, "y": 4},
+      "blur": 12,
+      "spread": 0
+    }
+  ],
+  "blurs": [
+    {
+      "name": "Glass Effect",
+      "type": "BACKGROUND_BLUR",
+      "radius": 20
+    }
+  ]
+}
+```
+
+### Published Styles
+
+```python
+figma_get_styles(
+    file_key="qyFsYyLyBsutXGGzZ9PLCp",
+    include_fill_styles=True,
+    include_text_styles=True,
+    include_effect_styles=True
+)
+```
+
+**Output:**
+```json
+{
+  "fill_styles": [
+    {
+      "key": "abc123",
+      "name": "Primary/500",
+      "description": "Primary brand color",
+      "fills": [{"type": "SOLID", "color": "#3B82F6"}]
+    }
+  ],
+  "text_styles": [
+    {
+      "key": "def456",
+      "name": "Heading/H1",
+      "fontFamily": "Inter",
+      "fontSize": 32,
+      "fontWeight": 700
+    }
+  ],
+  "effect_styles": [...]
 }
 ```
 
@@ -383,6 +520,27 @@ https://www.figma.com/design/qyFsYyLyBsutXGGzZ9PLCp/My-Design
 - Python 3.10+
 - Figma account with API access
 - Personal Access Token
+
+---
+
+## 🆕 What's New in v1.2.0
+
+### Enhanced Design Extraction
+- **Gradient Support**: Linear, radial, angular, and diamond gradients
+- **Individual Corner Radii**: Per-corner border-radius support
+- **Transform Properties**: Rotation and scale extraction
+- **Blend Modes**: Full blend mode support (multiply, screen, overlay, etc.)
+- **Advanced Effects**: Layer blur and background blur support
+- **Multiple Shadows**: Support for multiple drop and inner shadows
+
+### New Tool
+- **`figma_get_styles`**: Fetch published styles (fill, text, effect, grid) from Figma files
+
+### Improved Code Generation
+- All 10 frameworks now support gradients, transforms, and advanced effects
+- Better alignment and layout handling
+- SwiftUI custom corner shape generation
+- Kotlin Compose brush definitions for gradients
 
 ---
 
