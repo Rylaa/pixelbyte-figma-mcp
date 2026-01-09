@@ -4,7 +4,7 @@ A powerful MCP (Model Context Protocol) server for Figma API integration. Extrac
 
 ## Features
 
-- **8 MCP Tools** for complete Figma integration
+- **11 MCP Tools** for complete Figma integration
 - **10 Code Frameworks** - React, Vue, Tailwind, CSS, SCSS, SwiftUI, Kotlin
 - **Design Token Extraction** - Colors, typography, spacing
 - **Nested Children Support** - Full component tree with all styles
@@ -51,6 +51,9 @@ export FIGMA_ACCESS_TOKEN="your-token-here"
 | `figma_get_colors` | Extract fill, stroke, shadow colors |
 | `figma_get_typography` | Extract font styles |
 | `figma_get_spacing` | Extract padding and gap values |
+| `figma_get_code_connect_map` | Get Code Connect mappings |
+| `figma_add_code_connect_map` | Add/update Code Connect mapping |
+| `figma_remove_code_connect_map` | Remove Code Connect mapping |
 
 ## Code Generation
 
@@ -98,6 +101,38 @@ figma_generate_code(
     framework="react_tailwind"
 )
 ```
+
+## Code Connect
+
+Map Figma components to your code implementations for better code generation:
+
+```python
+# Add a Code Connect mapping
+figma_add_code_connect_map(
+    file_key="qyFsYyLyBsutXGGzZ9PLCp",
+    node_id="1707:6176",
+    component_path="src/components/Button.tsx",
+    component_name="Button",
+    props_mapping={"Variant": "variant", "Size": "size"},
+    variants={"primary": {"variant": "primary"}},
+    example="<Button variant='primary'>Click</Button>"
+)
+
+# Get all mappings for a file
+figma_get_code_connect_map(
+    file_key="qyFsYyLyBsutXGGzZ9PLCp"
+)
+
+# Remove a mapping
+figma_remove_code_connect_map(
+    file_key="qyFsYyLyBsutXGGzZ9PLCp",
+    node_id="1707:6176"
+)
+```
+
+**Storage Location:** `~/.config/pixelbyte-figma-mcp/code_connect.json`
+
+**Custom Path:** Set `FIGMA_CODE_CONNECT_PATH` environment variable
 
 ## License
 

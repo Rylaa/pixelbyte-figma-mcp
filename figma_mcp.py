@@ -16,6 +16,7 @@ import os
 import json
 import re
 import base64
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Literal
 from enum import Enum
 from dataclasses import dataclass
@@ -314,8 +315,184 @@ class FigmaSpacingInput(BaseModel):
 
 
 # ============================================================================
+# Code Connect Input Models
+# ============================================================================
+
+class CodeConnectMapping(BaseModel):
+    """Code Connect mapping data model."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    component_path: str = Field(..., description="Path to the code component file")
+    component_name: str = Field(..., description="Name of the code component")
+    props_mapping: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapping of Figma property names to code prop names"
+    )
+    variants: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Variant mappings with their prop values"
+    )
+    example: Optional[str] = Field(
+        default=None,
+        description="Example usage code snippet"
+    )
+    created_at: Optional[str] = Field(default=None, description="Creation timestamp")
+    updated_at: Optional[str] = Field(default=None, description="Last update timestamp")
+
+
+class FigmaCodeConnectGetInput(BaseModel):
+    """Input model for getting Code Connect mappings."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    file_key: str = Field(
+        ...,
+        description="Figma file key",
+        min_length=10,
+        max_length=50
+    )
+    node_id: Optional[str] = Field(
+        default=None,
+        description="Optional node ID to get specific mapping (returns all if not provided)"
+    )
+
+    @field_validator('file_key')
+    @classmethod
+    def validate_file_key(cls, v: str) -> str:
+        if 'figma.com' in v:
+            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
+            if match:
+                return match.group(1)
+        return v
+
+    @field_validator('node_id')
+    @classmethod
+    def normalize_node_id(cls, v: Optional[str]) -> Optional[str]:
+        return v.replace('-', ':') if v else None
+
+
+class FigmaCodeConnectAddInput(BaseModel):
+    """Input model for adding Code Connect mapping."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    file_key: str = Field(
+        ...,
+        description="Figma file key",
+        min_length=10,
+        max_length=50
+    )
+    node_id: str = Field(
+        ...,
+        description="Figma node ID to map",
+        min_length=1
+    )
+    component_path: str = Field(
+        ...,
+        description="Path to the code component (e.g., 'src/components/Button.tsx')",
+        min_length=1
+    )
+    component_name: str = Field(
+        ...,
+        description="Name of the code component (e.g., 'Button')",
+        min_length=1
+    )
+    props_mapping: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapping of Figma property names to code prop names (e.g., {'Variant': 'variant'})"
+    )
+    variants: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Variant mappings (e.g., {'primary': {'variant': 'primary'}})"
+    )
+    example: Optional[str] = Field(
+        default=None,
+        description="Example usage code snippet"
+    )
+
+    @field_validator('file_key')
+    @classmethod
+    def validate_file_key(cls, v: str) -> str:
+        if 'figma.com' in v:
+            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
+            if match:
+                return match.group(1)
+        return v
+
+    @field_validator('node_id')
+    @classmethod
+    def normalize_node_id(cls, v: str) -> str:
+        return v.replace('-', ':')
+
+
+class FigmaCodeConnectRemoveInput(BaseModel):
+    """Input model for removing Code Connect mapping."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
+
+    file_key: str = Field(
+        ...,
+        description="Figma file key",
+        min_length=10,
+        max_length=50
+    )
+    node_id: str = Field(
+        ...,
+        description="Figma node ID to remove mapping for",
+        min_length=1
+    )
+
+    @field_validator('file_key')
+    @classmethod
+    def validate_file_key(cls, v: str) -> str:
+        if 'figma.com' in v:
+            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
+            if match:
+                return match.group(1)
+        return v
+
+    @field_validator('node_id')
+    @classmethod
+    def normalize_node_id(cls, v: str) -> str:
+        return v.replace('-', ':')
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
+
+# Code Connect storage configuration
+CODE_CONNECT_DEFAULT_PATH = os.path.expanduser(
+    "~/.config/pixelbyte-figma-mcp/code_connect.json"
+)
+
+
+def _get_code_connect_path() -> str:
+    """Get the path to the Code Connect storage file."""
+    return os.environ.get("FIGMA_CODE_CONNECT_PATH", CODE_CONNECT_DEFAULT_PATH)
+
+
+def _load_code_connect_data() -> Dict[str, Any]:
+    """Load Code Connect mappings from storage file."""
+    path = _get_code_connect_path()
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {"version": "1.0", "mappings": {}}
+    return {"version": "1.0", "mappings": {}}
+
+
+def _save_code_connect_data(data: Dict[str, Any]) -> None:
+    """Save Code Connect mappings to storage file."""
+    path = _get_code_connect_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def _get_current_timestamp() -> str:
+    """Get current UTC timestamp in ISO format."""
+    return datetime.now(timezone.utc).isoformat()
+
 
 def _get_figma_token() -> str:
     """Get Figma API token from environment."""
@@ -2022,6 +2199,235 @@ async def figma_get_spacing(params: FigmaSpacingInput) -> str:
 
     except Exception as e:
         return _handle_api_error(e)
+
+
+# ============================================================================
+# Code Connect Tools
+# ============================================================================
+
+@mcp.tool(
+    name="figma_get_code_connect_map",
+    annotations={
+        "title": "Get Code Connect Mappings",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+    }
+)
+async def figma_get_code_connect_map(params: FigmaCodeConnectGetInput) -> str:
+    """
+    Get Code Connect mappings for a Figma file.
+
+    Retrieves stored mappings between Figma components and code implementations.
+    These mappings help generate accurate code by linking design components
+    to their actual code counterparts.
+
+    Args:
+        params: FigmaCodeConnectGetInput containing:
+            - file_key (str): Figma file key
+            - node_id (Optional[str]): Specific node ID to get mapping for
+
+    Returns:
+        str: JSON formatted Code Connect mappings
+
+    Examples:
+        - Get all mappings for a file: file_key="ABC123"
+        - Get specific mapping: file_key="ABC123", node_id="1:2"
+    """
+    try:
+        data = _load_code_connect_data()
+        mappings = data.get("mappings", {})
+        file_mappings = mappings.get(params.file_key, {})
+
+        if not file_mappings:
+            return json.dumps({
+                "status": "success",
+                "file_key": params.file_key,
+                "mappings": {},
+                "message": f"No Code Connect mappings found for file '{params.file_key}'."
+            }, indent=2)
+
+        # If specific node_id requested
+        if params.node_id:
+            node_mapping = file_mappings.get(params.node_id)
+            if node_mapping:
+                return json.dumps({
+                    "status": "success",
+                    "file_key": params.file_key,
+                    "node_id": params.node_id,
+                    "mapping": node_mapping
+                }, indent=2)
+            else:
+                return json.dumps({
+                    "status": "not_found",
+                    "file_key": params.file_key,
+                    "node_id": params.node_id,
+                    "message": f"No mapping found for node '{params.node_id}' in file '{params.file_key}'."
+                }, indent=2)
+
+        # Return all mappings for the file
+        return json.dumps({
+            "status": "success",
+            "file_key": params.file_key,
+            "mappings": file_mappings,
+            "count": len(file_mappings)
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": str(e)
+        }, indent=2)
+
+
+@mcp.tool(
+    name="figma_add_code_connect_map",
+    annotations={
+        "title": "Add Code Connect Mapping",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+    }
+)
+async def figma_add_code_connect_map(params: FigmaCodeConnectAddInput) -> str:
+    """
+    Add or update a Code Connect mapping for a Figma component.
+
+    Creates a mapping between a Figma component (identified by file_key and node_id)
+    and its code implementation. This mapping helps generate accurate code by
+    providing context about component paths, prop mappings, and variants.
+
+    Args:
+        params: FigmaCodeConnectAddInput containing:
+            - file_key (str): Figma file key
+            - node_id (str): Figma node ID to map
+            - component_path (str): Path to code component (e.g., 'src/components/Button.tsx')
+            - component_name (str): Name of the component (e.g., 'Button')
+            - props_mapping (Dict[str, str]): Mapping of Figma props to code props
+            - variants (Dict[str, Dict]): Variant mappings
+            - example (Optional[str]): Example usage code
+
+    Returns:
+        str: JSON formatted result with status
+
+    Examples:
+        - Add Button mapping:
+          file_key="ABC123", node_id="1:2",
+          component_path="src/components/Button.tsx",
+          component_name="Button",
+          props_mapping={"Variant": "variant", "Size": "size"},
+          variants={"primary": {"variant": "primary"}},
+          example="<Button variant='primary'>Click</Button>"
+    """
+    try:
+        data = _load_code_connect_data()
+        mappings = data.setdefault("mappings", {})
+        file_mappings = mappings.setdefault(params.file_key, {})
+
+        # Check if updating existing
+        is_update = params.node_id in file_mappings
+        timestamp = _get_current_timestamp()
+
+        # Create mapping
+        mapping = {
+            "component_path": params.component_path,
+            "component_name": params.component_name,
+            "props_mapping": params.props_mapping,
+            "variants": params.variants,
+            "example": params.example,
+            "updated_at": timestamp
+        }
+
+        if is_update:
+            # Preserve created_at
+            mapping["created_at"] = file_mappings[params.node_id].get("created_at", timestamp)
+        else:
+            mapping["created_at"] = timestamp
+
+        file_mappings[params.node_id] = mapping
+        _save_code_connect_data(data)
+
+        action = "updated" if is_update else "added"
+        return json.dumps({
+            "status": "success",
+            "action": action,
+            "file_key": params.file_key,
+            "node_id": params.node_id,
+            "mapping": mapping,
+            "message": f"Code Connect mapping {action} successfully for '{params.component_name}'."
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": str(e)
+        }, indent=2)
+
+
+@mcp.tool(
+    name="figma_remove_code_connect_map",
+    annotations={
+        "title": "Remove Code Connect Mapping",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": False
+    }
+)
+async def figma_remove_code_connect_map(params: FigmaCodeConnectRemoveInput) -> str:
+    """
+    Remove a Code Connect mapping for a Figma component.
+
+    Deletes the mapping between a Figma component and its code implementation.
+
+    Args:
+        params: FigmaCodeConnectRemoveInput containing:
+            - file_key (str): Figma file key
+            - node_id (str): Figma node ID to remove mapping for
+
+    Returns:
+        str: JSON formatted result with status
+
+    Examples:
+        - Remove mapping: file_key="ABC123", node_id="1:2"
+    """
+    try:
+        data = _load_code_connect_data()
+        mappings = data.get("mappings", {})
+        file_mappings = mappings.get(params.file_key, {})
+
+        if params.node_id not in file_mappings:
+            return json.dumps({
+                "status": "not_found",
+                "file_key": params.file_key,
+                "node_id": params.node_id,
+                "message": f"No mapping found for node '{params.node_id}' in file '{params.file_key}'."
+            }, indent=2)
+
+        # Remove the mapping
+        removed_mapping = file_mappings.pop(params.node_id)
+
+        # Clean up empty file mappings
+        if not file_mappings:
+            mappings.pop(params.file_key, None)
+
+        _save_code_connect_data(data)
+
+        return json.dumps({
+            "status": "success",
+            "file_key": params.file_key,
+            "node_id": params.node_id,
+            "removed_mapping": removed_mapping,
+            "message": f"Code Connect mapping removed successfully for '{removed_mapping.get('component_name', 'Unknown')}'."
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": str(e)
+        }, indent=2)
 
 
 # ============================================================================

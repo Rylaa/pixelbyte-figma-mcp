@@ -1,7 +1,7 @@
 [project]
 name = "pixelbyte-figma-mcp"
-version = "1.0.0"
-description = "MCP Server for Figma API - Design token extraction, screenshot, and code generation for React, Vue, SwiftUI, Kotlin"
+version = "1.1.0"
+description = "MCP Server for Figma API - Design token extraction, Code Connect mappings, screenshot, and code generation for React, Vue, SwiftUI, Kotlin"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -13,6 +13,7 @@ keywords = [
     "mcp",
     "model-context-protocol",
     "design-tokens",
+    "code-connect",
     "code-generation",
     "react",
     "tailwind",
