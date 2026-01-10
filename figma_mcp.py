@@ -17,13 +17,49 @@ import json
 import re
 import base64
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any, Literal, Annotated, Tuple, Callable
 from enum import Enum
 from dataclasses import dataclass
 
 import httpx
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, ConfigDict, BeforeValidator
 from mcp.server.fastmcp import FastMCP
+
+
+# ============================================================================
+# Reusable Validators (Annotated Types)
+# ============================================================================
+
+def _extract_file_key(v: str) -> str:
+    """Extract Figma file key from URL or return as-is."""
+    if 'figma.com' in v:
+        match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
+        if match:
+            return match.group(1)
+        raise ValueError("Could not extract file key from Figma URL")
+    return v
+
+
+def _normalize_node_id(v: str) -> str:
+    """Convert node ID from 1-2 format to 1:2 format."""
+    return v.replace('-', ':') if v else v
+
+
+def _normalize_optional_node_id(v: Optional[str]) -> Optional[str]:
+    """Convert optional node ID from 1-2 format to 1:2 format."""
+    return v.replace('-', ':') if v else v
+
+
+def _normalize_node_ids(v: List[str]) -> List[str]:
+    """Convert list of node IDs from 1-2 format to 1:2 format."""
+    return [nid.replace('-', ':') for nid in v]
+
+
+# Annotated types for reuse across all models
+FigmaFileKey = Annotated[str, BeforeValidator(_extract_file_key), Field(min_length=10, max_length=50)]
+FigmaNodeId = Annotated[str, BeforeValidator(_normalize_node_id), Field(min_length=1)]
+FigmaOptionalNodeId = Annotated[Optional[str], BeforeValidator(_normalize_optional_node_id)]
+FigmaNodeIdList = Annotated[List[str], BeforeValidator(_normalize_node_ids)]
 
 # ============================================================================
 # Constants
@@ -32,6 +68,81 @@ from mcp.server.fastmcp import FastMCP
 FIGMA_API_BASE = "https://api.figma.com/v1"
 CHARACTER_LIMIT = 25000
 DEFAULT_TIMEOUT = 30.0
+
+# Tailwind CSS font weight mapping
+TAILWIND_WEIGHT_MAP = {
+    100: 'font-thin',
+    200: 'font-extralight',
+    300: 'font-light',
+    400: 'font-normal',
+    500: 'font-medium',
+    600: 'font-semibold',
+    700: 'font-bold',
+    800: 'font-extrabold',
+    900: 'font-black'
+}
+
+# SwiftUI font weight mapping
+SWIFTUI_WEIGHT_MAP = {
+    100: '.ultraLight',
+    200: '.thin',
+    300: '.light',
+    400: '.regular',
+    500: '.medium',
+    600: '.semibold',
+    700: '.bold',
+    800: '.heavy',
+    900: '.black'
+}
+
+# Kotlin Compose font weight mapping
+KOTLIN_WEIGHT_MAP = {
+    100: 'FontWeight.Thin',
+    200: 'FontWeight.ExtraLight',
+    300: 'FontWeight.Light',
+    400: 'FontWeight.Normal',
+    500: 'FontWeight.Medium',
+    600: 'FontWeight.SemiBold',
+    700: 'FontWeight.Bold',
+    800: 'FontWeight.ExtraBold',
+    900: 'FontWeight.Black'
+}
+
+# Tailwind text alignment mapping
+TAILWIND_ALIGN_MAP = {
+    'LEFT': 'text-left',
+    'CENTER': 'text-center',
+    'RIGHT': 'text-right',
+    'JUSTIFIED': 'text-justify'
+}
+
+# Max children limit for recursive operations
+MAX_CHILDREN_LIMIT = 20
+
+
+# ============================================================================
+# Color Utility Functions
+# ============================================================================
+
+def _color_to_rgb255(color: Dict[str, float]) -> Tuple[int, int, int]:
+    """Convert Figma color (0-1 range) to RGB255 (0-255 range)."""
+    return (
+        int(color.get('r', 0) * 255),
+        int(color.get('g', 0) * 255),
+        int(color.get('b', 0) * 255)
+    )
+
+
+def _color_to_hex(color: Dict[str, float]) -> str:
+    """Convert Figma color (0-1 range) to hex string."""
+    r, g, b = _color_to_rgb255(color)
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def _color_to_rgba_str(color: Dict[str, float], opacity: float = 1.0) -> str:
+    """Convert Figma color to rgba() string."""
+    r, g, b = _color_to_rgb255(color)
+    return f"rgba({r}, {g}, {b}, {opacity})"
 
 # ============================================================================
 # Initialize MCP Server
@@ -79,11 +190,9 @@ class FigmaFileInput(BaseModel):
     """Input model for file operations."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(
+    file_key: FigmaFileKey = Field(
         ...,
-        description="Figma file key (from URL: figma.com/design/FILE_KEY/...)",
-        min_length=10,
-        max_length=50
+        description="Figma file key (from URL: figma.com/design/FILE_KEY/...)"
     )
     depth: Optional[int] = Field(
         default=2,
@@ -96,61 +205,25 @@ class FigmaFileInput(BaseModel):
         description="Output format: 'markdown' or 'json'"
     )
 
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        # Extract file key from URL if full URL provided
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-            raise ValueError("Could not extract file key from Figma URL")
-        return v
-
 
 class FigmaNodeInput(BaseModel):
     """Input model for node operations."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(
-        ...,
-        description="Figma file key",
-        min_length=10,
-        max_length=50
-    )
-    node_id: str = Field(
-        ...,
-        description="Node ID (e.g., '1:2' or '1-2')",
-        min_length=1
-    )
+    file_key: FigmaFileKey = Field(..., description="Figma file key")
+    node_id: FigmaNodeId = Field(..., description="Node ID (e.g., '1:2' or '1-2')")
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN,
         description="Output format"
     )
-
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-            raise ValueError("Could not extract file key from Figma URL")
-        return v
-
-    @field_validator('node_id')
-    @classmethod
-    def normalize_node_id(cls, v: str) -> str:
-        # Convert 1-2 format to 1:2
-        return v.replace('-', ':')
 
 
 class FigmaScreenshotInput(BaseModel):
     """Input model for screenshot operations."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(..., description="Figma file key", min_length=10, max_length=50)
-    node_ids: List[str] = Field(
+    file_key: FigmaFileKey = Field(..., description="Figma file key")
+    node_ids: FigmaNodeIdList = Field(
         ...,
         description="List of node IDs to capture (e.g., ['1:2', '3:4'])",
         min_length=1,
@@ -167,27 +240,13 @@ class FigmaScreenshotInput(BaseModel):
         le=4.0
     )
 
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-        return v
-
-    @field_validator('node_ids')
-    @classmethod
-    def normalize_node_ids(cls, v: List[str]) -> List[str]:
-        return [nid.replace('-', ':') for nid in v]
-
 
 class FigmaDesignTokensInput(BaseModel):
     """Input model for design token extraction."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(..., description="Figma file key", min_length=10, max_length=50)
-    node_id: Optional[str] = Field(
+    file_key: FigmaFileKey = Field(..., description="Figma file key")
+    node_id: FigmaOptionalNodeId = Field(
         default=None,
         description="Optional node ID to extract tokens from specific component"
     )
@@ -200,22 +259,13 @@ class FigmaDesignTokensInput(BaseModel):
         description="Include ready-to-use CSS variables, SCSS variables, and Tailwind config"
     )
 
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-        return v
-
 
 class FigmaCodeGenInput(BaseModel):
     """Input model for code generation."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(..., description="Figma file key", min_length=10, max_length=50)
-    node_id: str = Field(..., description="Node ID to generate code for")
+    file_key: FigmaFileKey = Field(..., description="Figma file key")
+    node_id: FigmaNodeId = Field(..., description="Node ID to generate code for")
     framework: CodeFramework = Field(
         default=CodeFramework.REACT_TAILWIND,
         description="Target framework"
@@ -225,26 +275,12 @@ class FigmaCodeGenInput(BaseModel):
         description="Component name (auto-generated from node name if not provided)"
     )
 
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-        return v
-
-    @field_validator('node_id')
-    @classmethod
-    def normalize_node_id(cls, v: str) -> str:
-        return v.replace('-', ':')
-
 
 class FigmaStylesInput(BaseModel):
     """Input model for published styles retrieval."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(..., description="Figma file key", min_length=10, max_length=50)
+    file_key: FigmaFileKey = Field(..., description="Figma file key")
     include_fill_styles: bool = Field(default=True, description="Include fill/color styles")
     include_text_styles: bool = Field(default=True, description="Include text/typography styles")
     include_effect_styles: bool = Field(default=True, description="Include effect styles (shadows, blurs)")
@@ -253,15 +289,6 @@ class FigmaStylesInput(BaseModel):
         default=ResponseFormat.MARKDOWN,
         description="Output format: 'markdown' or 'json'"
     )
-
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-        return v
 
 
 # ============================================================================
@@ -294,47 +321,19 @@ class FigmaCodeConnectGetInput(BaseModel):
     """Input model for getting Code Connect mappings."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(
-        ...,
-        description="Figma file key",
-        min_length=10,
-        max_length=50
-    )
-    node_id: Optional[str] = Field(
+    file_key: FigmaFileKey = Field(..., description="Figma file key")
+    node_id: FigmaOptionalNodeId = Field(
         default=None,
         description="Optional node ID to get specific mapping (returns all if not provided)"
     )
-
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-        return v
-
-    @field_validator('node_id')
-    @classmethod
-    def normalize_node_id(cls, v: Optional[str]) -> Optional[str]:
-        return v.replace('-', ':') if v else None
 
 
 class FigmaCodeConnectAddInput(BaseModel):
     """Input model for adding Code Connect mapping."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(
-        ...,
-        description="Figma file key",
-        min_length=10,
-        max_length=50
-    )
-    node_id: str = Field(
-        ...,
-        description="Figma node ID to map",
-        min_length=1
-    )
+    file_key: FigmaFileKey = Field(..., description="Figma file key")
+    node_id: FigmaNodeId = Field(..., description="Figma node ID to map")
     component_path: str = Field(
         ...,
         description="Path to the code component (e.g., 'src/components/Button.tsx')",
@@ -358,63 +357,21 @@ class FigmaCodeConnectAddInput(BaseModel):
         description="Example usage code snippet"
     )
 
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-        return v
-
-    @field_validator('node_id')
-    @classmethod
-    def normalize_node_id(cls, v: str) -> str:
-        return v.replace('-', ':')
-
 
 class FigmaCodeConnectRemoveInput(BaseModel):
     """Input model for removing Code Connect mapping."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(
-        ...,
-        description="Figma file key",
-        min_length=10,
-        max_length=50
-    )
-    node_id: str = Field(
-        ...,
-        description="Figma node ID to remove mapping for",
-        min_length=1
-    )
-
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-        return v
-
-    @field_validator('node_id')
-    @classmethod
-    def normalize_node_id(cls, v: str) -> str:
-        return v.replace('-', ':')
+    file_key: FigmaFileKey = Field(..., description="Figma file key")
+    node_id: FigmaNodeId = Field(..., description="Figma node ID to remove mapping for")
 
 
 class FigmaListAssetsInput(BaseModel):
     """Input model for listing assets in a Figma file/node."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(
-        ...,
-        description="Figma file key",
-        min_length=10,
-        max_length=50
-    )
-    node_id: Optional[str] = Field(
+    file_key: FigmaFileKey = Field(..., description="Figma file key")
+    node_id: FigmaOptionalNodeId = Field(
         default=None,
         description="Optional node ID to search within (searches entire file if not provided)"
     )
@@ -435,66 +392,24 @@ class FigmaListAssetsInput(BaseModel):
         description="Output format"
     )
 
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-        return v
-
-    @field_validator('node_id')
-    @classmethod
-    def normalize_node_id(cls, v: Optional[str]) -> Optional[str]:
-        if v:
-            return v.replace('-', ':')
-        return v
-
 
 class FigmaGetImagesInput(BaseModel):
     """Input model for getting image fill URLs."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(
-        ...,
-        description="Figma file key",
-        min_length=10,
-        max_length=50
-    )
-    node_id: Optional[str] = Field(
+    file_key: FigmaFileKey = Field(..., description="Figma file key")
+    node_id: FigmaOptionalNodeId = Field(
         default=None,
         description="Optional node ID to get images from"
     )
-
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-        return v
-
-    @field_validator('node_id')
-    @classmethod
-    def normalize_node_id(cls, v: Optional[str]) -> Optional[str]:
-        if v:
-            return v.replace('-', ':')
-        return v
 
 
 class FigmaExportAssetsInput(BaseModel):
     """Input model for batch asset export."""
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True)
 
-    file_key: str = Field(
-        ...,
-        description="Figma file key",
-        min_length=10,
-        max_length=50
-    )
-    node_ids: List[str] = Field(
+    file_key: FigmaFileKey = Field(..., description="Figma file key")
+    node_ids: FigmaNodeIdList = Field(
         ...,
         description="List of node IDs to export",
         min_length=1,
@@ -514,20 +429,6 @@ class FigmaExportAssetsInput(BaseModel):
         default=True,
         description="Generate inline SVG for vector nodes"
     )
-
-    @field_validator('file_key')
-    @classmethod
-    def validate_file_key(cls, v: str) -> str:
-        if 'figma.com' in v:
-            match = re.search(r'figma\.com/(?:design|file)/([a-zA-Z0-9]+)', v)
-            if match:
-                return match.group(1)
-        return v
-
-    @field_validator('node_ids')
-    @classmethod
-    def normalize_node_ids(cls, v: List[str]) -> List[str]:
-        return [nid.replace('-', ':') for nid in v]
 
 
 # ============================================================================
@@ -1952,11 +1853,37 @@ def _sanitize_token_name(name: str) -> str:
     return sanitized or 'unnamed'
 
 
-def _generate_css_variables(colors: List[Dict], typography: List[Dict], spacing: List[Dict], effects: List[Dict]) -> str:
-    """Generate CSS custom properties from design tokens."""
-    lines = [":root {", "  /* Colors */"]
+def _generate_style_variables(
+    colors: List[Dict],
+    typography: List[Dict],
+    spacing: List[Dict],
+    effects: List[Dict],
+    format: Literal['css', 'scss'] = 'css'
+) -> str:
+    """Generate CSS or SCSS variables from design tokens.
 
-    # Deduplicate colors by hex value
+    Args:
+        colors: List of color tokens
+        typography: List of typography tokens
+        spacing: List of spacing tokens
+        effects: List of effect tokens (shadows, blurs)
+        format: Output format - 'css' or 'scss'
+    """
+    is_css = format == 'css'
+    prefix = '--' if is_css else '$'
+    indent = '  ' if is_css else ''
+    comment = lambda text: f"  /* {text} */" if is_css else f"// {text}"
+
+    lines = []
+
+    # Header
+    if is_css:
+        lines.append(":root {")
+        lines.append(comment("Colors"))
+    else:
+        lines.extend(["// Design Tokens - Generated from Figma", "", "// Colors"])
+
+    # Colors (deduplicated)
     seen_colors = set()
     for color in colors:
         hex_val = color.get('hex') or color.get('color', '')
@@ -1964,119 +1891,76 @@ def _generate_css_variables(colors: List[Dict], typography: List[Dict], spacing:
             seen_colors.add(hex_val)
             name = _sanitize_token_name(color.get('name', 'color'))
             category = color.get('category', 'fill')
-            lines.append(f"  --color-{category}-{name}: {hex_val};")
+            lines.append(f"{indent}{prefix}color-{category}-{name}: {hex_val};")
 
-    # Typography
+    # Typography (deduplicated by font family)
     if typography:
         lines.append("")
-        lines.append("  /* Typography */")
+        lines.append(comment("Typography"))
         seen_fonts = set()
         for typo in typography:
             font_family = typo.get('fontFamily', 'sans-serif')
             if font_family not in seen_fonts:
                 seen_fonts.add(font_family)
                 name = _sanitize_token_name(font_family)
-                lines.append(f"  --font-family-{name}: '{font_family}', sans-serif;")
-                lines.append(f"  --font-size-{name}: {typo.get('fontSize', 16)}px;")
-                lines.append(f"  --font-weight-{name}: {typo.get('fontWeight', 400)};")
-                if typo.get('lineHeight'):
-                    lines.append(f"  --line-height-{name}: {typo.get('lineHeight')}px;")
+                lines.append(f"{indent}{prefix}font-family-{name}: '{font_family}', sans-serif;")
+                lines.append(f"{indent}{prefix}font-size-{name}: {typo.get('fontSize', 16)}px;")
+                lines.append(f"{indent}{prefix}font-weight-{name}: {typo.get('fontWeight', 400)};")
+                if is_css and typo.get('lineHeight'):
+                    lines.append(f"{indent}{prefix}line-height-{name}: {typo.get('lineHeight')}px;")
 
-    # Spacing
+    # Spacing (deduplicated)
     if spacing:
         lines.append("")
-        lines.append("  /* Spacing */")
+        lines.append(comment("Spacing"))
         seen_spacing = set()
         for sp in spacing:
             if sp.get('type') == 'auto-layout':
+                name = _sanitize_token_name(sp.get('name', 'spacing'))
                 padding = sp.get('padding', {})
                 gap = sp.get('gap', 0)
-                name = _sanitize_token_name(sp.get('name', 'spacing'))
                 key = f"{padding.get('top', 0)}-{padding.get('right', 0)}-{gap}"
                 if key not in seen_spacing:
                     seen_spacing.add(key)
-                    lines.append(f"  --spacing-{name}-padding: {padding.get('top', 0)}px {padding.get('right', 0)}px {padding.get('bottom', 0)}px {padding.get('left', 0)}px;")
-                    lines.append(f"  --spacing-{name}-gap: {gap}px;")
+                    if is_css:
+                        lines.append(f"{indent}{prefix}spacing-{name}-padding: {padding.get('top', 0)}px {padding.get('right', 0)}px {padding.get('bottom', 0)}px {padding.get('left', 0)}px;")
+                    lines.append(f"{indent}{prefix}spacing-{name}-gap: {gap}px;")
 
-    # Effects (shadows)
+    # Shadows (deduplicated)
     if effects:
         lines.append("")
-        lines.append("  /* Shadows */")
+        lines.append(comment("Shadows"))
         seen_shadows = set()
         for effect in effects:
             if effect.get('type') in ['DROP_SHADOW', 'INNER_SHADOW']:
-                hex_val = effect.get('hex') or effect.get('color', '#000')
-                offset = effect.get('offset', {})
-                key = f"{hex_val}-{offset.get('x', 0)}-{offset.get('y', 0)}-{effect.get('radius', 0)}"
-                if key not in seen_shadows:
-                    seen_shadows.add(key)
-                    name = _sanitize_token_name(effect.get('name', 'shadow'))
-                    x = offset.get('x', 0)
-                    y = offset.get('y', 0)
-                    blur = effect.get('radius', 0)
-                    spread = effect.get('spread', 0)
-                    inset = 'inset ' if effect.get('type') == 'INNER_SHADOW' else ''
-                    lines.append(f"  --shadow-{name}: {inset}{x}px {y}px {blur}px {spread}px {hex_val};")
-
-    lines.append("}")
-    return "\n".join(lines)
-
-
-def _generate_scss_variables(colors: List[Dict], typography: List[Dict], spacing: List[Dict], effects: List[Dict]) -> str:
-    """Generate SCSS variables from design tokens."""
-    lines = ["// Design Tokens - Generated from Figma", "", "// Colors"]
-
-    # Colors
-    seen_colors = set()
-    for color in colors:
-        hex_val = color.get('hex') or color.get('color', '')
-        if hex_val and hex_val not in seen_colors and not hex_val.startswith('/*'):
-            seen_colors.add(hex_val)
-            name = _sanitize_token_name(color.get('name', 'color'))
-            category = color.get('category', 'fill')
-            lines.append(f"$color-{category}-{name}: {hex_val};")
-
-    # Typography
-    if typography:
-        lines.append("")
-        lines.append("// Typography")
-        seen_fonts = set()
-        for typo in typography:
-            font_family = typo.get('fontFamily', 'sans-serif')
-            if font_family not in seen_fonts:
-                seen_fonts.add(font_family)
-                name = _sanitize_token_name(font_family)
-                lines.append(f"$font-family-{name}: '{font_family}', sans-serif;")
-                lines.append(f"$font-size-{name}: {typo.get('fontSize', 16)}px;")
-                lines.append(f"$font-weight-{name}: {typo.get('fontWeight', 400)};")
-
-    # Spacing
-    if spacing:
-        lines.append("")
-        lines.append("// Spacing")
-        for sp in spacing:
-            if sp.get('type') == 'auto-layout':
-                name = _sanitize_token_name(sp.get('name', 'spacing'))
-                gap = sp.get('gap', 0)
-                lines.append(f"$spacing-{name}-gap: {gap}px;")
-
-    # Shadows
-    if effects:
-        lines.append("")
-        lines.append("// Shadows")
-        for effect in effects:
-            if effect.get('type') in ['DROP_SHADOW', 'INNER_SHADOW']:
-                name = _sanitize_token_name(effect.get('name', 'shadow'))
                 hex_val = effect.get('hex') or effect.get('color', '#000')
                 offset = effect.get('offset', {})
                 x = offset.get('x', 0)
                 y = offset.get('y', 0)
                 blur = effect.get('radius', 0)
                 spread = effect.get('spread', 0)
-                inset = 'inset ' if effect.get('type') == 'INNER_SHADOW' else ''
-                lines.append(f"$shadow-{name}: {inset}{x}px {y}px {blur}px {spread}px {hex_val};")
+                key = f"{hex_val}-{x}-{y}-{blur}"
+                if key not in seen_shadows:
+                    seen_shadows.add(key)
+                    name = _sanitize_token_name(effect.get('name', 'shadow'))
+                    inset = 'inset ' if effect.get('type') == 'INNER_SHADOW' else ''
+                    lines.append(f"{indent}{prefix}shadow-{name}: {inset}{x}px {y}px {blur}px {spread}px {hex_val};")
+
+    # Footer
+    if is_css:
+        lines.append("}")
 
     return "\n".join(lines)
+
+
+def _generate_css_variables(colors: List[Dict], typography: List[Dict], spacing: List[Dict], effects: List[Dict]) -> str:
+    """Generate CSS custom properties from design tokens."""
+    return _generate_style_variables(colors, typography, spacing, effects, format='css')
+
+
+def _generate_scss_variables(colors: List[Dict], typography: List[Dict], spacing: List[Dict], effects: List[Dict]) -> str:
+    """Generate SCSS variables from design tokens."""
+    return _generate_style_variables(colors, typography, spacing, effects, format='scss')
 
 
 def _generate_tailwind_config(colors: List[Dict], typography: List[Dict], spacing: List[Dict]) -> str:
