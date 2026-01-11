@@ -16,6 +16,7 @@ import os
 import json
 import re
 import base64
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Literal, Annotated, Tuple, Callable
 from enum import Enum
@@ -68,6 +69,10 @@ FigmaNodeIdList = Annotated[List[str], BeforeValidator(_normalize_node_ids)]
 FIGMA_API_BASE = "https://api.figma.com/v1"
 CHARACTER_LIMIT = 25000
 DEFAULT_TIMEOUT = 30.0
+
+# Retry configuration for network errors
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 1.0  # Base delay in seconds (exponential backoff)
 
 # Tailwind CSS font weight mapping
 TAILWIND_WEIGHT_MAP = {
@@ -487,19 +492,33 @@ async def _make_figma_request(
     method: str = "GET",
     params: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """Make authenticated request to Figma API."""
+    """Make authenticated request to Figma API with retry logic."""
     token = _get_figma_token()
+    last_exception = None
 
-    async with httpx.AsyncClient() as client:
-        response = await client.request(
-            method=method,
-            url=f"{FIGMA_API_BASE}/{endpoint}",
-            headers={"X-Figma-Token": token},
-            params=params,
-            timeout=DEFAULT_TIMEOUT
-        )
-        response.raise_for_status()
-        return response.json()
+    for attempt in range(MAX_RETRIES):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.request(
+                    method=method,
+                    url=f"{FIGMA_API_BASE}/{endpoint}",
+                    headers={"X-Figma-Token": token},
+                    params=params,
+                    timeout=DEFAULT_TIMEOUT
+                )
+                response.raise_for_status()
+                return response.json()
+        except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as e:
+            last_exception = e
+            if attempt < MAX_RETRIES - 1:
+                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                await asyncio.sleep(delay)
+                continue
+            raise
+        except httpx.HTTPStatusError:
+            raise
+
+    raise last_exception
 
 
 def _handle_api_error(e: Exception) -> str:
@@ -515,6 +534,10 @@ def _handle_api_error(e: Exception) -> str:
         elif status == 429:
             return "Error: Rate limit exceeded. Please wait before making more requests."
         return f"Error: Figma API returned status {status}"
+    elif isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return "Error: Could not connect to Figma API after multiple retries. Check your internet connection."
+    elif isinstance(e, OSError) and "nodename nor servname" in str(e):
+        return "Error: DNS resolution failed for Figma API. Check your internet connection and try again."
     elif isinstance(e, httpx.TimeoutException):
         return "Error: Request timed out. The file might be too large."
     elif isinstance(e, ValueError):
