@@ -485,6 +485,10 @@ https://www.figma.com/design/qyFsYyLyBsutXGGzZ9PLCp/My-Design
 
 ## 🆕 What's New in v2.3.x
 
+### v2.3.3 - Bug Fix
+- **Fixed KeyError**: Resolved `KeyError: 'value'` in `figma_get_design_tokens` color deduplication
+- **Robust dedup keys**: Color deduplication now handles all fill types (solid, gradient, image)
+
 ### v2.3.2 - Code Quality Improvements
 - **Removed unused functions**: Cleaned up `_color_to_rgb255`, `_color_to_hex`, `_color_to_rgba_str`
 - **DRY improvements**: Consolidated inline weight maps to global constants

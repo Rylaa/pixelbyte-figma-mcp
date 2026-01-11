@@ -4835,10 +4835,20 @@ async def figma_get_design_tokens(params: FigmaDesignTokensInput) -> str:
         if params.include_colors:
             colors: List[Dict[str, Any]] = []
             _extract_colors_from_node(node, colors)
-            # Deduplicate by value
+            # Deduplicate by color value
             unique_colors = {}
             for c in colors:
-                key = c['value']
+                # Generate dedup key based on color type
+                if c.get('hex'):
+                    key = c['hex']
+                elif c.get('color'):
+                    key = c['color']
+                elif c.get('gradient'):
+                    key = str(c['gradient'])
+                elif c.get('image'):
+                    key = c['image'].get('imageRef', str(c['image']))
+                else:
+                    key = str(c)
                 if key not in unique_colors:
                     unique_colors[key] = c
             tokens['colors'] = list(unique_colors.values())
