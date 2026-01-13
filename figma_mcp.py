@@ -17,6 +17,8 @@ import json
 import re
 import base64
 import asyncio
+import tempfile
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Literal, Annotated, Tuple, Callable
 from enum import Enum
@@ -4829,7 +4831,7 @@ async def figma_get_screenshot(params: FigmaScreenshotInput) -> str:
             - scale (float): Scale factor (0.01 to 4.0)
 
     Returns:
-        str: Image URLs for each requested node
+        str: Local file paths for each screenshot
     """
     try:
         ids = ",".join(params.node_ids)
@@ -4848,24 +4850,45 @@ async def figma_get_screenshot(params: FigmaScreenshotInput) -> str:
         if not images:
             return "Error: No images were generated. Check the node IDs."
 
+        # Create screenshots directory in temp folder
+        screenshots_dir = Path(tempfile.gettempdir()) / "figma_screenshots"
+        screenshots_dir.mkdir(exist_ok=True)
+
         lines = [
             "# Generated Screenshots",
             f"**Format:** {params.format.value.upper()}",
             f"**Scale:** {params.scale}x",
             "",
-            "## Image URLs",
+            "## Local Files",
             ""
         ]
 
-        for node_id, url in images.items():
-            if url:
-                lines.append(f"- **{node_id}**: [Download]({url})")
-            else:
-                lines.append(f"- **{node_id}**: ⚠️ Failed to render")
+        # Download each image and save locally
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for node_id, url in images.items():
+                if url:
+                    try:
+                        response = await client.get(url)
+                        response.raise_for_status()
+
+                        # Create filename from node_id and file_key
+                        safe_node_id = node_id.replace(":", "-")
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"{params.file_key}_{safe_node_id}_{timestamp}.{params.format.value}"
+                        filepath = screenshots_dir / filename
+
+                        # Save the image
+                        filepath.write_bytes(response.content)
+
+                        lines.append(f"- **{node_id}**: `{filepath}`")
+                    except Exception as download_err:
+                        lines.append(f"- **{node_id}**: Failed to download - {download_err}")
+                else:
+                    lines.append(f"- **{node_id}**: Failed to render")
 
         lines.extend([
             "",
-            "> Note: These URLs expire in 30 days."
+            f"> Screenshots saved to: `{screenshots_dir}`"
         ])
 
         return "\n".join(lines)

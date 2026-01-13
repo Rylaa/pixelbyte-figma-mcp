@@ -422,7 +422,7 @@ figma_remove_code_connect_map(
 
 ## 📸 Screenshot Export
 
-Export Figma nodes as images in multiple formats.
+Export Figma nodes as images in multiple formats. Screenshots are **automatically downloaded and saved locally** for easy access.
 
 ```python
 figma_get_screenshot(
@@ -434,14 +434,20 @@ figma_get_screenshot(
 ```
 
 **Output:**
-```json
-{
-  "images": {
-    "1707:6176": "https://figma-alpha-api.s3.us-west-2.amazonaws.com/images/...",
-    "1707:6200": "https://figma-alpha-api.s3.us-west-2.amazonaws.com/images/..."
-  }
-}
 ```
+# Generated Screenshots
+**Format:** PNG
+**Scale:** 2x
+
+## Local Files
+
+- **1707:6176**: `/tmp/figma_screenshots/qyFsYyLyBsutXGGzZ9PLCp_1707-6176_20260113_143022.png`
+- **1707:6200**: `/tmp/figma_screenshots/qyFsYyLyBsutXGGzZ9PLCp_1707-6200_20260113_143022.png`
+
+> Screenshots saved to: `/tmp/figma_screenshots`
+```
+
+Screenshots are saved to a temporary directory and can be directly read by Claude Code's `Read` tool for visual analysis.
 
 ---
 
@@ -480,157 +486,6 @@ https://www.figma.com/design/qyFsYyLyBsutXGGzZ9PLCp/My-Design
 - Python 3.10+
 - Figma account with API access
 - Personal Access Token
-
----
-
-## 🆕 What's New in v2.3.x
-
-### v2.3.4 - Smart Asset Detection
-- **Smart Icon Detection**: `figma_list_assets` now intelligently detects icon frames by name pattern (e.g., `mynaui:image-solid`) and size/structure heuristics
-- **New `include_icons` parameter**: Enabled by default, detects icon frames and treats them as single assets instead of drilling into individual vector paths
-- **Changed default**: `include_vectors` now defaults to `false` (raw vectors usually not needed when icon detection is enabled)
-- **Improved output**: Icons displayed in table format with name, node ID, type, and size
-
-### v2.3.3 - Bug Fix
-- **Fixed KeyError**: Resolved `KeyError: 'value'` in `figma_get_design_tokens` color deduplication
-- **Robust dedup keys**: Color deduplication now handles all fill types (solid, gradient, image)
-
-### v2.3.2 - Code Quality Improvements
-- **Removed unused functions**: Cleaned up `_color_to_rgb255`, `_color_to_hex`, `_color_to_rgba_str`
-- **DRY improvements**: Consolidated inline weight maps to global constants
-- **Magic number elimination**: Replaced hardcoded limits with named constants
-
-### v2.3.1 - Network Resilience
-- **Retry mechanism**: Added exponential backoff retry for network errors
-- **DNS error handling**: Graceful recovery from intermittent DNS resolution failures
-- **Improved error messages**: Clearer error descriptions for connection issues
-
-### v2.3.0 - Validator Consolidation
-- **Consolidated validators**: Unified validation helpers for cleaner codebase
-- **Code organization**: Better structured helper functions
-
----
-
-## 🆕 What's New in v2.2.0
-
-### 📦 Asset Management System
-Three new tools for comprehensive asset handling:
-
-**`figma_list_assets`** - Catalog all exportable assets in your design:
-```python
-figma_list_assets(
-    file_key="qyFsYyLyBsutXGGzZ9PLCp",
-    node_id="1707:6176",  # Optional: search within specific node
-    include_images=True,
-    include_vectors=True,
-    include_exports=True
-)
-```
-Returns categorized list of:
-- Image fills (photos, illustrations with `imageRef`)
-- Vector/icon nodes (SVG exportable shapes)
-- Nodes with export settings configured
-
-**`figma_get_images`** - Get actual download URLs for image fills:
-```python
-figma_get_images(
-    file_key="qyFsYyLyBsutXGGzZ9PLCp",
-    node_id="1707:6176"  # Optional: filter to specific node
-)
-```
-Resolves internal `imageRef` values to real S3 URLs (valid for 30 days).
-
-**`figma_export_assets`** - Batch export with SVG generation:
-```python
-figma_export_assets(
-    file_key="qyFsYyLyBsutXGGzZ9PLCp",
-    node_ids=["1:2", "1:3", "1:4"],
-    format="png",  # png, svg, jpg, pdf
-    scale=2.0,
-    include_svg_for_vectors=True  # Generate inline SVG from path data
-)
-```
-Returns download URLs + generated SVG markup for vector nodes.
-
-### 🎨 SVG Generation from Path Data
-New helper function generates complete SVG from vector geometry:
-- Uses `fillGeometry` and `strokeGeometry` path data
-- Preserves fill and stroke colors
-- Correct viewBox based on node bounds
-- Works with VECTOR, STAR, POLYGON, ELLIPSE, LINE nodes
-
-### 🔧 New Helper Functions
-| Function | Description |
-|----------|-------------|
-| `_resolve_image_urls()` | Convert imageRef to actual S3 URLs |
-| `_generate_svg_from_paths()` | Create SVG from vector path geometry |
-| `_collect_all_assets()` | Recursively find all assets in node tree |
-
----
-
-## What's New in v2.1.0
-
-### 🎯 Enhanced Code Generation
-- **textCase → CSS**: `UPPER`, `LOWER`, `TITLE` now generate `text-transform` properties
-- **Hyperlinks**: Text hyperlinks generate proper `<a>` tags in React/Vue/HTML
-- **Line Clamp**: `maxLines` generates `-webkit-line-clamp` CSS for text truncation
-- **Paragraph Spacing**: `paragraphSpacing` generates `margin-bottom` on text blocks
-- **Flex Grow**: `layoutGrow` generates `flex-grow` for flexible layouts
-- **Multiple Fills**: Layered backgrounds now generate comma-separated CSS backgrounds
-
-### 📦 New Extractions
-- **Render Bounds**: `absoluteRenderBounds` for actual visual bounds including effects
-- **Export Settings**: Format, scale, and SVG options for export configurations
-- **Mask Data**: `isMask`, `maskType`, and `clipsContent` for masking behavior
-- **Interactions**: Prototype triggers, actions, transitions for hover/click states
-- **Vector Paths**: `fillGeometry`, `strokeGeometry` for SVG export
-- **Image References**: Image fill refs with API URL hints for resolution
-
-### 🧩 Component Intelligence
-- **Variant Properties**: Full variant info for component instances
-- **Main Component**: Source component tracking with `mainComponent` details
-- **Component Set Name**: Context for variant components
-
-### 🚀 Implementation Hints
-AI-friendly guidance automatically generated:
-- Layout suggestions (flexbox direction, grid recommendations)
-- Responsive hints (breakpoint suggestions, scaling guidance)
-- Interaction hints (hover states, click navigation)
-- Component hints (variant usage, exposed props)
-
-### ♿ Accessibility Checks
-Automatic WCAG compliance warnings:
-- **Contrast Issues**: Low contrast text detection with contrast ratios
-- **Touch Targets**: Small interactive element warnings (< 44px)
-- **Label Warnings**: Missing aria-label on icon-only buttons
-
----
-
-## What's New in v2.0.0
-
-### ⚠️ Breaking Changes
-- **Removed Tools**: `figma_get_colors`, `figma_get_typography`, `figma_get_spacing` have been removed
-- **Use Instead**: `figma_get_design_tokens` now provides all these features in one unified tool
-
-### Rich Color Information
-- **RGB Values**: Every color now includes RGB string (`59, 130, 246`)
-- **HSL Values**: HSL color representation (`217, 91%, 60%`)
-- **WCAG Contrast Ratios**: Automatic contrast calculation against white and black backgrounds
-
-### Ready-to-Use Code Generation
-- **CSS Variables**: Complete `:root` block with all design tokens
-- **SCSS Variables**: SCSS variable definitions for colors, typography, spacing
-- **Tailwind Config**: Ready-to-paste Tailwind theme extension
-
-### API Optimizations
-- **Faster `figma_get_styles`**: Reduced from 2 API calls to 1 for improved performance
-- **Optimized Node Fetching**: Style enrichment now fetches only required nodes
-
-### Previous Features (v1.2.0)
-- Gradient support (linear, radial, angular, diamond)
-- Transform properties (rotation, scale)
-- Advanced effects (layer blur, background blur)
-- Multiple shadow support
 
 ---
 
