@@ -5847,8 +5847,12 @@ async def figma_get_images(params: FigmaGetImagesInput) -> str:
         if not images:
             return "No image fills found in the specified node."
 
+        # Create images directory in temp folder
+        images_dir = Path(tempfile.gettempdir()) / "figma_images"
+        images_dir.mkdir(exist_ok=True)
+
         lines = [
-            "# Image Fill URLs",
+            "# Image Fill Downloads",
             f"**File:** `{params.file_key}`",
         ]
         if params.node_id:
@@ -5856,24 +5860,53 @@ async def figma_get_images(params: FigmaGetImagesInput) -> str:
         lines.extend([
             f"**Total Images:** {len(images)}",
             "",
-            "## Image URLs",
+            "## 📥 Local Files",
             ""
         ])
 
-        for ref, url in images.items():
-            if url:
-                lines.append(f"### `{ref}`")
-                lines.append(f"[Download Image]({url})")
-                lines.append("")
-            else:
-                lines.append(f"### `{ref}`")
-                lines.append("⚠️ URL not available")
-                lines.append("")
+        # Download and save each image locally
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for ref, url in images.items():
+                if url:
+                    try:
+                        response = await client.get(url)
+                        response.raise_for_status()
+
+                        # Determine file extension from content type or URL
+                        content_type = response.headers.get('content-type', '')
+                        if 'png' in content_type or url.endswith('.png'):
+                            ext = 'png'
+                        elif 'jpeg' in content_type or 'jpg' in content_type or url.endswith('.jpg'):
+                            ext = 'jpg'
+                        elif 'svg' in content_type or url.endswith('.svg'):
+                            ext = 'svg'
+                        else:
+                            ext = 'png'  # Default to png
+
+                        # Create filename from ref
+                        safe_ref = ref.replace(":", "-").replace("/", "-")
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"{params.file_key}_{safe_ref}_{timestamp}.{ext}"
+                        filepath = images_dir / filename
+
+                        # Save the image
+                        filepath.write_bytes(response.content)
+
+                        lines.append(f"### `{ref}`")
+                        lines.append(f"**Saved to:** `{filepath}`")
+                        lines.append("")
+                    except Exception as download_err:
+                        lines.append(f"### `{ref}`")
+                        lines.append(f"⚠️ Failed to download: {download_err}")
+                        lines.append("")
+                else:
+                    lines.append(f"### `{ref}`")
+                    lines.append("⚠️ URL not available")
+                    lines.append("")
 
         lines.extend([
             "---",
-            "> **Note:** URLs expire in 30 days. Download images before expiration.",
-            "> Use these URLs in CSS: `background-image: url('...')`"
+            f"> Images saved to: `{images_dir}`"
         ])
 
         return "\n".join(lines)
@@ -5945,29 +5978,58 @@ async def figma_export_assets(params: FigmaExportAssetsInput) -> str:
 
         images = data.get('images', {})
 
+        # Create assets directory in temp folder
+        assets_dir = Path(tempfile.gettempdir()) / "figma_assets"
+        assets_dir.mkdir(exist_ok=True)
+
         lines = [
             "# Asset Export Results",
             f"**File:** `{params.file_key}`",
             f"**Format:** {params.format.value.upper()}",
             f"**Scale:** {params.scale}x",
             f"**Nodes:** {len(params.node_ids)}",
+            "",
+            "## 📥 Local Files",
             ""
         ]
 
-        # Export URLs
-        lines.extend(["## 📥 Download URLs", ""])
-        for node_id, url in images.items():
-            if url:
-                lines.append(f"- **{node_id}**: [Download]({url})")
-            else:
-                lines.append(f"- **{node_id}**: ⚠️ Export failed")
+        # Download and save each asset locally
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for node_id, url in images.items():
+                if url:
+                    try:
+                        response = await client.get(url)
+                        response.raise_for_status()
+
+                        # Create filename from node_id
+                        safe_node_id = node_id.replace(":", "-")
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"{params.file_key}_{safe_node_id}_{timestamp}.{params.format.value}"
+                        filepath = assets_dir / filename
+
+                        # Save the asset
+                        filepath.write_bytes(response.content)
+
+                        lines.append(f"- **{node_id}**: `{filepath}`")
+                    except Exception as download_err:
+                        lines.append(f"- **{node_id}**: Failed to download - {download_err}")
+                else:
+                    lines.append(f"- **{node_id}**: Export failed")
         lines.append("")
 
         # Inline SVGs for vectors
         if vector_svgs:
             lines.extend(["## 🎨 Generated SVG (from path data)", ""])
             for node_id, svg_data in vector_svgs.items():
+                # Also save SVG to file
+                safe_node_id = node_id.replace(":", "-")
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                svg_filename = f"{params.file_key}_{safe_node_id}_{timestamp}_generated.svg"
+                svg_filepath = assets_dir / svg_filename
+                svg_filepath.write_text(svg_data['svg'])
+
                 lines.append(f"### {svg_data['name']} (`{node_id}`)")
+                lines.append(f"**Saved to:** `{svg_filepath}`")
                 lines.append("```svg")
                 lines.append(svg_data['svg'])
                 lines.append("```")
@@ -5975,8 +6037,7 @@ async def figma_export_assets(params: FigmaExportAssetsInput) -> str:
 
         lines.extend([
             "---",
-            "> **Note:** Download URLs expire in 30 days.",
-            "> Generated SVGs are created from path geometry and may differ from Figma's SVG export."
+            f"> Assets saved to: `{assets_dir}`"
         ])
 
         return "\n".join(lines)
