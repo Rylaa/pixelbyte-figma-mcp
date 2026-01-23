@@ -1,6 +1,6 @@
 [project]
 name = "pixelbyte-figma-mcp"
-version = "2.3.6"
+version = "2.3.7"
 description = "MCP Server for Figma API - Design tokens, gradients, effects, interactions, accessibility checks, Code Connect, and code generation for React, Vue, SwiftUI, Kotlin"
 readme = "README.md"
 license = {text = "MIT"}
