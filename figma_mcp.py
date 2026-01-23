@@ -188,6 +188,20 @@ class FigmaFileInput(BaseModel):
         default=ResponseFormat.MARKDOWN,
         description="Output format: 'markdown' or 'json'"
     )
+    include_empty_frames: bool = Field(
+        default=False,
+        description="Include frames/groups with no children (default: False to reduce noise)"
+    )
+    min_children_count: int = Field(
+        default=0,
+        description="Minimum number of children a frame must have to be included (0 = no minimum)",
+        ge=0,
+        le=100
+    )
+    mark_downloadable_assets: bool = Field(
+        default=True,
+        description="Mark nodes that contain downloadable assets (images, vectors, icons)"
+    )
 
 
 class FigmaNodeInput(BaseModel):
@@ -2330,12 +2344,61 @@ def _get_node_with_children(file_key: str, node_id: Optional[str], data: Dict[st
     return data.get('document', {})
 
 
-def _node_to_simplified_tree(node: Dict[str, Any], depth: int, current_depth: int = 0) -> Dict[str, Any]:
-    """Convert Figma node to simplified tree structure."""
+def _node_has_downloadable_assets(node: Dict[str, Any]) -> bool:
+    """Check if a node contains downloadable assets (images, vectors, icons)."""
+    # Check for image fills
+    fills = node.get('fills', [])
+    for fill in fills:
+        if fill.get('type') == 'IMAGE':
+            return True
+
+    # Check for export settings
+    if node.get('exportSettings'):
+        return True
+
+    # Check if it's a vector type that could be an icon
+    node_type = node.get('type', '')
+    if node_type in ['VECTOR', 'BOOLEAN_OPERATION', 'STAR', 'POLYGON', 'LINE']:
+        return True
+
+    # Check for icon-like naming patterns
+    name = node.get('name', '').lower()
+    icon_patterns = ['icon', 'logo', 'svg', 'asset', 'image', 'img', 'pic']
+    if any(pattern in name for pattern in icon_patterns):
+        return True
+
+    return False
+
+
+def _node_to_simplified_tree(
+    node: Dict[str, Any],
+    depth: int,
+    current_depth: int = 0,
+    include_empty_frames: bool = False,
+    min_children_count: int = 0,
+    mark_downloadable_assets: bool = True
+) -> Optional[Dict[str, Any]]:
+    """Convert Figma node to simplified tree structure with smart filtering."""
+    node_type = node.get('type', '')
+    children = node.get('children', [])
+
+    # Filter logic for frames/groups
+    container_types = ['FRAME', 'GROUP', 'SECTION', 'COMPONENT', 'COMPONENT_SET', 'INSTANCE']
+    is_container = node_type in container_types
+
+    if is_container:
+        # Skip empty frames if include_empty_frames is False
+        if not include_empty_frames and len(children) == 0:
+            return None
+
+        # Skip frames with fewer children than min_children_count
+        if min_children_count > 0 and len(children) < min_children_count:
+            return None
+
     simplified = {
         'id': node.get('id'),
         'name': node.get('name'),
-        'type': node.get('type')
+        'type': node_type
     }
 
     # Add bounds if available
@@ -2346,12 +2409,27 @@ def _node_to_simplified_tree(node: Dict[str, Any], depth: int, current_depth: in
             'height': round(bbox.get('height', 0))
         }
 
+    # Mark downloadable assets
+    if mark_downloadable_assets and _node_has_downloadable_assets(node):
+        simplified['hasAsset'] = True
+
     # Add children if within depth limit
-    if current_depth < depth and 'children' in node:
-        simplified['children'] = [
-            _node_to_simplified_tree(child, depth, current_depth + 1)
-            for child in node.get('children', [])
-        ]
+    if current_depth < depth and children:
+        filtered_children = []
+        for child in children:
+            child_tree = _node_to_simplified_tree(
+                child,
+                depth,
+                current_depth + 1,
+                include_empty_frames,
+                min_children_count,
+                mark_downloadable_assets
+            )
+            if child_tree is not None:
+                filtered_children.append(child_tree)
+
+        if filtered_children:
+            simplified['children'] = filtered_children
 
     return simplified
 
@@ -4240,13 +4318,18 @@ async def figma_get_file_structure(params: FigmaFileInput) -> str:
             - file_key (str): Figma file key or full URL
             - depth (int): How deep to traverse the node tree (1-10)
             - response_format: 'markdown' or 'json'
+            - include_empty_frames (bool): Include frames with no children (default: False)
+            - min_children_count (int): Minimum children required (default: 0)
+            - mark_downloadable_assets (bool): Mark nodes with downloadable assets (default: True)
 
     Returns:
-        str: File structure in requested format
+        str: File structure in requested format. Nodes with 'hasAsset: true' contain
+             downloadable images, vectors, or icons.
 
     Examples:
         - "Get structure of file XYZ123" -> file_key="XYZ123", depth=2
         - Full URL works too: file_key="https://figma.com/design/XYZ123/MyFile"
+        - Skip noise: include_empty_frames=False, min_children_count=1
     """
     try:
         data = await _make_figma_request(f"files/{params.file_key}")
@@ -4255,8 +4338,15 @@ async def figma_get_file_structure(params: FigmaFileInput) -> str:
         name = data.get('name', 'Unknown')
         last_modified = data.get('lastModified', 'Unknown')
 
-        # Build simplified tree
-        tree = _node_to_simplified_tree(document, params.depth)
+        # Build simplified tree with filtering options
+        tree = _node_to_simplified_tree(
+            document,
+            params.depth,
+            current_depth=0,
+            include_empty_frames=params.include_empty_frames,
+            min_children_count=params.min_children_count,
+            mark_downloadable_assets=params.mark_downloadable_assets
+        )
 
         if params.response_format == ResponseFormat.JSON:
             response = {
@@ -4277,6 +4367,8 @@ async def figma_get_file_structure(params: FigmaFileInput) -> str:
         ]
 
         def format_tree(node: Dict, indent: int = 0) -> None:
+            if node is None:
+                return
             prefix = "  " * indent
             icon = "📄" if node.get('type') == 'DOCUMENT' else \
                    "📑" if node.get('type') == 'CANVAS' else \
@@ -4288,7 +4380,10 @@ async def figma_get_file_structure(params: FigmaFileInput) -> str:
             bounds = node.get('bounds', {})
             size_str = f" ({bounds.get('width')}×{bounds.get('height')})" if bounds else ""
 
-            lines.append(f"{prefix}{icon} **{node.get('name')}** `{node.get('id')}`{size_str}")
+            # Add asset marker if node has downloadable assets
+            asset_marker = " 🎨" if node.get('hasAsset') else ""
+
+            lines.append(f"{prefix}{icon} **{node.get('name')}** `{node.get('id')}`{size_str}{asset_marker}")
 
             for child in node.get('children', []):
                 format_tree(child, indent + 1)
@@ -5838,7 +5933,7 @@ async def figma_get_images(params: FigmaGetImagesInput) -> str:
             if root_node:
                 # Collect image refs from node
                 assets: Dict[str, List] = {'images': [], 'vectors': [], 'exports': []}
-                _collect_all_assets(root_node, params.file_key, assets)
+                _collect_all_assets(root_node, params.file_key, assets, include_icons=False, include_vectors=False)
                 node_image_refs = {img['imageRef'] for img in assets['images']}
 
                 # Filter to only matching images
