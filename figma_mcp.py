@@ -4976,8 +4976,14 @@ async def figma_get_screenshot(params: FigmaScreenshotInput) -> str:
                         filepath.write_bytes(response.content)
 
                         lines.append(f"- **{node_id}**: `{filepath}`")
-                    except Exception as download_err:
-                        lines.append(f"- **{node_id}**: Failed to download - {download_err}")
+                    except httpx.HTTPStatusError as e:
+                        lines.append(f"- **{node_id}**: HTTP error {e.response.status_code}")
+                    except httpx.TimeoutException:
+                        lines.append(f"- **{node_id}**: Download timed out")
+                    except OSError as e:
+                        lines.append(f"- **{node_id}**: File system error - {e.strerror}")
+                    except Exception as e:
+                        lines.append(f"- **{node_id}**: Unexpected error - {type(e).__name__}: {e}")
                 else:
                     lines.append(f"- **{node_id}**: Failed to render")
 
@@ -5990,9 +5996,21 @@ async def figma_get_images(params: FigmaGetImagesInput) -> str:
                         lines.append(f"### `{ref}`")
                         lines.append(f"**Saved to:** `{filepath}`")
                         lines.append("")
-                    except Exception as download_err:
+                    except httpx.HTTPStatusError as e:
                         lines.append(f"### `{ref}`")
-                        lines.append(f"⚠️ Failed to download: {download_err}")
+                        lines.append(f"⚠️ HTTP error {e.response.status_code}")
+                        lines.append("")
+                    except httpx.TimeoutException:
+                        lines.append(f"### `{ref}`")
+                        lines.append(f"⚠️ Download timed out")
+                        lines.append("")
+                    except OSError as e:
+                        lines.append(f"### `{ref}`")
+                        lines.append(f"⚠️ File system error - {e.strerror}")
+                        lines.append("")
+                    except Exception as e:
+                        lines.append(f"### `{ref}`")
+                        lines.append(f"⚠️ Unexpected error - {type(e).__name__}: {e}")
                         lines.append("")
                 else:
                     lines.append(f"### `{ref}`")
@@ -6106,8 +6124,14 @@ async def figma_export_assets(params: FigmaExportAssetsInput) -> str:
                         filepath.write_bytes(response.content)
 
                         lines.append(f"- **{node_id}**: `{filepath}`")
-                    except Exception as download_err:
-                        lines.append(f"- **{node_id}**: Failed to download - {download_err}")
+                    except httpx.HTTPStatusError as e:
+                        lines.append(f"- **{node_id}**: HTTP error {e.response.status_code}")
+                    except httpx.TimeoutException:
+                        lines.append(f"- **{node_id}**: Download timed out")
+                    except OSError as e:
+                        lines.append(f"- **{node_id}**: File system error - {e.strerror}")
+                    except Exception as e:
+                        lines.append(f"- **{node_id}**: Unexpected error - {type(e).__name__}: {e}")
                 else:
                     lines.append(f"- **{node_id}**: Export failed")
         lines.append("")
