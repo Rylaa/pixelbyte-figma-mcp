@@ -4968,7 +4968,7 @@ async def figma_get_screenshot(params: FigmaScreenshotInput) -> str:
 
                         # Create filename from node_id and file_key
                         safe_node_id = node_id.replace(":", "-")
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                         filename = f"{params.file_key}_{safe_node_id}_{timestamp}.{params.format.value}"
                         filepath = screenshots_dir / filename
 
@@ -5980,7 +5980,7 @@ async def figma_get_images(params: FigmaGetImagesInput) -> str:
 
                         # Create filename from ref
                         safe_ref = ref.replace(":", "-").replace("/", "-")
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                         filename = f"{params.file_key}_{safe_ref}_{timestamp}.{ext}"
                         filepath = images_dir / filename
 
@@ -6098,7 +6098,7 @@ async def figma_export_assets(params: FigmaExportAssetsInput) -> str:
 
                         # Create filename from node_id
                         safe_node_id = node_id.replace(":", "-")
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                         filename = f"{params.file_key}_{safe_node_id}_{timestamp}.{params.format.value}"
                         filepath = assets_dir / filename
 
@@ -6118,7 +6118,7 @@ async def figma_export_assets(params: FigmaExportAssetsInput) -> str:
             for node_id, svg_data in vector_svgs.items():
                 # Also save SVG to file
                 safe_node_id = node_id.replace(":", "-")
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                 svg_filename = f"{params.file_key}_{safe_node_id}_{timestamp}_generated.svg"
                 svg_filepath = assets_dir / svg_filename
                 svg_filepath.write_text(svg_data['svg'])
