@@ -471,6 +471,24 @@ https://www.figma.com/design/qyFsYyLyBsutXGGzZ9PLCp/My-Design
 
 ---
 
+## 📝 Changelog
+
+### v2.3.7
+- fix: prevent KeyError in figma_get_images by disabling icon collection
+- fix: add microseconds to timestamps to prevent filename collisions
+- fix: improve exception handling specificity in download functions
+
+### v2.3.6
+- feat: download assets locally for figma_export_assets and figma_get_images
+
+### v2.3.5
+- feat: save screenshots locally for Claude Code compatibility
+
+### v2.3.4
+- feat: smart asset detection for figma_list_assets
+
+---
+
 ## 🌍 Environment Variables
 
 | Variable | Required | Description |
