@@ -6,6 +6,7 @@ Supports: fills (solid, gradient, image), strokes, corner radius, shadows,
 blur, opacity, blend modes, rotation, padding, auto-layout, text styling.
 """
 
+import re
 from typing import Dict, Any
 
 # Import helpers from base module
@@ -673,10 +674,43 @@ def _swiftui_empty_container(node: Dict[str, Any], indent: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Component name sanitizer
+# ---------------------------------------------------------------------------
+
+def _sanitize_component_name(name: str) -> str:
+    """Convert Figma frame name to valid SwiftUI struct name.
+    'iPhone 13 & 14 - 241' -> 'Screen241'
+    'Effects screen' -> 'EffectsScreen'
+    'Login Page' -> 'LoginPage'
+    """
+    # Remove device names
+    cleaned = re.sub(r'(?i)iphone\s*\d+\s*[&/,]*\s*\d*\s*[-\u2013]\s*', '', name)
+    cleaned = re.sub(r'(?i)ipad\s*\w*\s*[-\u2013]\s*', '', cleaned)
+    cleaned = re.sub(r'(?i)android\s*\w*\s*[-\u2013]\s*', '', cleaned)
+    cleaned = cleaned.strip(' -\u2013')
+
+    if not cleaned:
+        cleaned = name  # Fallback to original
+
+    # PascalCase conversion
+    words = re.split(r'[\s_\-\u2013/&]+', cleaned)
+    pascal = ''.join(w.capitalize() for w in words if w)
+
+    # Remove non-alphanumeric chars
+    pascal = re.sub(r'[^a-zA-Z0-9]', '', pascal)
+
+    # Ensure starts with letter
+    if pascal and not pascal[0].isalpha():
+        pascal = 'Screen' + pascal
+
+    return pascal or 'GeneratedView'
+
+
+# ---------------------------------------------------------------------------
 # Task 7: Public entry point
 # ---------------------------------------------------------------------------
 
-def generate_swiftui_code(node: Dict[str, Any], component_name: str) -> str:
+def generate_swiftui_code(node: Dict[str, Any], component_name: str = '') -> str:
     """Generate complete SwiftUI view from Figma node tree.
 
     Public entry point. Produces a full SwiftUI struct with:
@@ -686,6 +720,9 @@ def generate_swiftui_code(node: Dict[str, Any], component_name: str) -> str:
     - Preview provider
     - RoundedCorner helper shape if needed
     """
+    if not component_name:
+        component_name = _sanitize_component_name(node.get('name', 'GeneratedView'))
+
     # Generate body content
     body_code = _generate_swiftui_node(node, indent=12, depth=0)
     if not body_code:
