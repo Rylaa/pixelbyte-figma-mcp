@@ -174,34 +174,58 @@ def _gradient_direction_swiftui(handles: list) -> tuple[str, str]:
 
 
 def _swiftui_stroke_modifier(node: Dict[str, Any]) -> str:
-    """Generate SwiftUI stroke/border modifier."""
-    stroke_data = parse_stroke(node)
-    if not stroke_data:
+    """Generate stroke modifier supporting solid, gradient, and dashed strokes."""
+    stroke = parse_stroke(node)
+    if not stroke or stroke.weight == 0:
         return ''
 
-    weight = stroke_data.get('weight', 0)
-    if not weight:
+    corners = parse_corners(node)
+    cr = corners.uniform_value if corners and corners.is_uniform else 0
+
+    first_color = stroke.colors[0] if stroke.colors else None
+    if not first_color:
         return ''
 
-    colors = stroke_data.get('colors', [])
-    if not colors:
-        return ''
+    # Build stroke style (for dashed borders)
+    has_dashes = len(stroke.dashes) > 0
+    dash_str = ', '.join(str(int(d)) for d in stroke.dashes) if has_dashes else ''
 
-    first = colors[0]
-    if first.get('type') != 'SOLID':
-        return ''
+    if first_color.type == 'SOLID' and first_color.color:
+        c = first_color.color
+        color_code = f"Color(red: {c.r:.3f}, green: {c.g:.3f}, blue: {c.b:.3f})"
+        if c.a < 1:
+            color_code += f".opacity({c.a:.2f})"
 
-    hex_color = first.get('hex', '#000000')
-    rgb = hex_to_rgb(hex_color)
-    opacity = first.get('opacity', 1)
+        if has_dashes:
+            return (f".overlay(\n"
+                    f"            RoundedRectangle(cornerRadius: {cr})\n"
+                    f"                .stroke(style: StrokeStyle(lineWidth: {stroke.weight}, dash: [{dash_str}]))\n"
+                    f"                .foregroundColor({color_code})\n"
+                    f"        )")
 
-    color_code = f"Color(red: {rgb[0]/255:.3f}, green: {rgb[1]/255:.3f}, blue: {rgb[2]/255:.3f})"
-    if opacity < 1:
-        color_code += f".opacity({opacity:.2f})"
+        return (f".overlay(\n"
+                f"            RoundedRectangle(cornerRadius: {cr})\n"
+                f"                .stroke({color_code}, lineWidth: {stroke.weight})\n"
+                f"        )")
 
-    radii = parse_corners(node)
-    corner = int(radii['topLeft']) if radii and radii.get('isUniform') else 0
-    return f".overlay(RoundedRectangle(cornerRadius: {corner}).stroke({color_code}, lineWidth: {weight}))"
+    elif first_color.gradient:
+        grad_code, _ = _gradient_to_swiftui(first_color.gradient)
+        if not grad_code:
+            return ''
+
+        if has_dashes:
+            return (f".overlay(\n"
+                    f"            RoundedRectangle(cornerRadius: {cr})\n"
+                    f"                .stroke(style: StrokeStyle(lineWidth: {stroke.weight}, dash: [{dash_str}]))\n"
+                    f"                .foregroundStyle({grad_code})\n"
+                    f"        )")
+
+        return (f".overlay(\n"
+                f"            RoundedRectangle(cornerRadius: {cr})\n"
+                f"                .stroke({grad_code}, lineWidth: {stroke.weight})\n"
+                f"        )")
+
+    return ''
 
 
 def _swiftui_corner_modifier(node: Dict[str, Any]) -> str:
