@@ -8,19 +8,16 @@ blur, opacity, blend modes, rotation, padding, auto-layout, text styling.
 
 from typing import Dict, Any
 
-# Import helpers from main module
-from figma_mcp import (
-    _hex_to_rgb,
-    _extract_stroke_data,
-    _extract_effects_data,
-    _extract_corner_radii,
-    SWIFTUI_WEIGHT_MAP,
-    MAX_NATIVE_CHILDREN_LIMIT,
+# Import helpers from base module
+from generators.base import (
+    hex_to_rgb,
+    parse_fills, parse_stroke, parse_corners, parse_effects, parse_layout,
+    parse_text_style, parse_style_bundle,
+    ColorValue, GradientDef, GradientStop, FillLayer, StrokeInfo, CornerRadii,
+    ShadowEffect, BlurEffect, LayoutInfo, TextStyle, StyleBundle,
+    SWIFTUI_WEIGHT_MAP, MAX_NATIVE_CHILDREN_LIMIT, MAX_DEPTH,
 )
 
-
-# Max recursion depth to prevent infinite nesting
-MAX_DEPTH = 8
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +138,7 @@ def _gradient_direction_swiftui(handles: list) -> tuple[str, str]:
 
 def _swiftui_stroke_modifier(node: Dict[str, Any]) -> str:
     """Generate SwiftUI stroke/border modifier."""
-    stroke_data = _extract_stroke_data(node)
+    stroke_data = parse_stroke(node)
     if not stroke_data:
         return ''
 
@@ -158,21 +155,21 @@ def _swiftui_stroke_modifier(node: Dict[str, Any]) -> str:
         return ''
 
     hex_color = first.get('hex', '#000000')
-    rgb = _hex_to_rgb(hex_color)
+    rgb = hex_to_rgb(hex_color)
     opacity = first.get('opacity', 1)
 
     color_code = f"Color(red: {rgb[0]/255:.3f}, green: {rgb[1]/255:.3f}, blue: {rgb[2]/255:.3f})"
     if opacity < 1:
         color_code += f".opacity({opacity:.2f})"
 
-    radii = _extract_corner_radii(node)
+    radii = parse_corners(node)
     corner = int(radii['topLeft']) if radii and radii.get('isUniform') else 0
     return f".overlay(RoundedRectangle(cornerRadius: {corner}).stroke({color_code}, lineWidth: {weight}))"
 
 
 def _swiftui_corner_modifier(node: Dict[str, Any]) -> str:
     """Generate SwiftUI corner radius modifier."""
-    radii = _extract_corner_radii(node)
+    radii = parse_corners(node)
     if not radii:
         return ''
 
@@ -191,7 +188,7 @@ def _swiftui_corner_modifier(node: Dict[str, Any]) -> str:
 
 def _swiftui_effects_modifier(node: Dict[str, Any]) -> list[str]:
     """Generate SwiftUI shadow and blur modifiers."""
-    effects_data = _extract_effects_data(node)
+    effects_data = parse_effects(node)
     modifiers = []
 
     shadows = effects_data.get('shadows') or []
@@ -200,7 +197,7 @@ def _swiftui_effects_modifier(node: Dict[str, Any]) -> list[str]:
     for shadow in shadows:
         if shadow.get('type') == 'DROP_SHADOW':
             color = shadow.get('hex', '#000000')
-            rgb = _hex_to_rgb(color)
+            rgb = hex_to_rgb(color)
             offset = shadow.get('offset', {'x': 0, 'y': 0})
             radius = shadow.get('radius', 0)
             opacity = shadow.get('opacity', 0.25)
@@ -417,7 +414,7 @@ def _swiftui_shape_node(node: Dict[str, Any], indent: int) -> str:
         shape_name = 'Divider'
     else:
         # Rectangle, Star, Polygon - use RoundedRectangle if has corner radius
-        corner_radii = _extract_corner_radii(node)
+        corner_radii = parse_corners(node)
         if corner_radii and corner_radii.get('isUniform') and corner_radii['topLeft'] > 0:
             shape_name = f"RoundedRectangle(cornerRadius: {int(corner_radii['topLeft'])})"
         else:
@@ -463,12 +460,12 @@ def _swiftui_shape_node(node: Dict[str, Any], indent: int) -> str:
         lines.append(f'{prefix}    {fill_code}')
 
     # Stroke
-    stroke_data = _extract_stroke_data(node)
+    stroke_data = parse_stroke(node)
     if stroke_data and stroke_data.get('weight') and stroke_data.get('colors'):
         first_color = stroke_data['colors'][0]
         if first_color.get('type') == 'SOLID':
             hex_c = first_color.get('hex', '#000000')
-            rgb = _hex_to_rgb(hex_c)
+            rgb = hex_to_rgb(hex_c)
             weight = stroke_data['weight']
             lines.append(f'{prefix}    .stroke(Color(red: {rgb[0]/255:.3f}, green: {rgb[1]/255:.3f}, blue: {rgb[2]/255:.3f}), lineWidth: {weight})')
 
@@ -479,7 +476,7 @@ def _swiftui_shape_node(node: Dict[str, Any], indent: int) -> str:
         lines.append(f'{prefix}    .frame(width: {w}, height: {h})')
 
     # Non-uniform corner radius (clip shape)
-    corner_radii = _extract_corner_radii(node)
+    corner_radii = parse_corners(node)
     if corner_radii and not corner_radii.get('isUniform'):
         tl = int(corner_radii['topLeft'])
         tr = int(corner_radii['topRight'])

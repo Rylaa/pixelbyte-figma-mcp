@@ -5603,7 +5603,7 @@ async def figma_generate_code(params: FigmaCodeGenInput) -> str:
         elif params.framework == CodeFramework.SCSS:
             code = _generate_scss_code(node, component_name)
         elif params.framework == CodeFramework.SWIFTUI:
-            from swiftui_generator import generate_swiftui_code
+            from generators.swiftui_generator import generate_swiftui_code
             code = generate_swiftui_code(node, component_name)
         elif params.framework == CodeFramework.KOTLIN:
             code = _generate_kotlin_code(node, component_name)
