@@ -10,15 +10,149 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Tuple
 import math
+import re
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_CHILDREN_LIMIT = 20       # React/Vue/CSS child limit per container
-MAX_NATIVE_CHILDREN_LIMIT = 10  # SwiftUI/Kotlin child limit
-MAX_DEPTH = 8                  # Max recursive depth
+MAX_CHILDREN_LIMIT = 30       # React/Vue/CSS child limit per container
+MAX_NATIVE_CHILDREN_LIMIT = 20  # SwiftUI/Kotlin child limit
+MAX_DEPTH = 12                  # Max recursive depth
+
+# Common Figma icon name patterns → SF Symbols mapping
+ICON_NAME_MAP = {
+    # Solar icons
+    'settings': 'gearshape', 'setting': 'gearshape', 'gear': 'gearshape',
+    'search': 'magnifyingglass', 'find': 'magnifyingglass',
+    'home': 'house', 'house': 'house',
+    'user': 'person', 'person': 'person', 'profile': 'person',
+    'heart': 'heart.fill', 'like': 'heart.fill', 'favorite': 'heart.fill',
+    'star': 'star.fill', 'rating': 'star.fill',
+    'bell': 'bell', 'notification': 'bell', 'alarm': 'bell',
+    'mail': 'envelope', 'email': 'envelope', 'message': 'envelope',
+    'chat': 'bubble.left', 'comment': 'bubble.left',
+    'share': 'square.and.arrow.up', 'export': 'square.and.arrow.up',
+    'download': 'arrow.down.circle', 'import': 'arrow.down.circle',
+    'upload': 'arrow.up.circle',
+    'close': 'xmark', 'x': 'xmark', 'cancel': 'xmark', 'remove': 'xmark',
+    'add': 'plus', 'plus': 'plus', 'create': 'plus',
+    'minus': 'minus', 'subtract': 'minus',
+    'check': 'checkmark', 'done': 'checkmark', 'tick': 'checkmark',
+    'arrow-left': 'chevron.left', 'back': 'chevron.left', 'chevron-left': 'chevron.left',
+    'arrow-right': 'chevron.right', 'forward': 'chevron.right', 'chevron-right': 'chevron.right',
+    'arrow-up': 'chevron.up', 'chevron-up': 'chevron.up',
+    'arrow-down': 'chevron.down', 'chevron-down': 'chevron.down',
+    'eye': 'eye', 'view': 'eye', 'visible': 'eye', 'show': 'eye',
+    'eye-off': 'eye.slash', 'hide': 'eye.slash', 'invisible': 'eye.slash',
+    'lock': 'lock', 'locked': 'lock', 'secure': 'lock',
+    'unlock': 'lock.open',
+    'trash': 'trash', 'delete': 'trash', 'bin': 'trash',
+    'edit': 'pencil', 'pencil': 'pencil', 'write': 'pencil',
+    'copy': 'doc.on.doc', 'duplicate': 'doc.on.doc',
+    'camera': 'camera', 'photo': 'photo',
+    'image': 'photo', 'picture': 'photo', 'gallery': 'photo',
+    'video': 'video', 'film': 'video', 'movie': 'video',
+    'play': 'play.fill', 'start': 'play.fill',
+    'pause': 'pause.fill', 'stop': 'stop.fill',
+    'music': 'music.note', 'audio': 'music.note',
+    'mic': 'mic', 'microphone': 'mic',
+    'phone': 'phone', 'call': 'phone',
+    'location': 'location', 'map': 'map', 'pin': 'mappin',
+    'calendar': 'calendar', 'date': 'calendar', 'schedule': 'calendar',
+    'clock': 'clock', 'time': 'clock', 'timer': 'timer',
+    'wifi': 'wifi', 'signal': 'wifi',
+    'bluetooth': 'wave.3.right',
+    'battery': 'battery.100',
+    'sun': 'sun.max', 'light': 'sun.max', 'brightness': 'sun.max',
+    'moon': 'moon', 'dark': 'moon', 'night': 'moon',
+    'cloud': 'cloud', 'weather': 'cloud',
+    'folder': 'folder', 'directory': 'folder',
+    'file': 'doc', 'document': 'doc',
+    'link': 'link', 'url': 'link', 'chain': 'link',
+    'globe': 'globe', 'web': 'globe', 'world': 'globe', 'internet': 'globe',
+    'filter': 'line.3.horizontal.decrease', 'sort': 'arrow.up.arrow.down',
+    'menu': 'line.3.horizontal', 'hamburger': 'line.3.horizontal',
+    'more': 'ellipsis', 'dots': 'ellipsis', 'options': 'ellipsis',
+    'info': 'info.circle', 'about': 'info.circle',
+    'help': 'questionmark.circle', 'question': 'questionmark.circle',
+    'warning': 'exclamationmark.triangle', 'alert': 'exclamationmark.triangle',
+    'error': 'xmark.circle', 'danger': 'xmark.circle',
+    'success': 'checkmark.circle', 'verified': 'checkmark.circle',
+    'refresh': 'arrow.clockwise', 'reload': 'arrow.clockwise', 'sync': 'arrow.clockwise',
+    'send': 'paperplane', 'submit': 'paperplane',
+    'attach': 'paperclip', 'attachment': 'paperclip',
+    'bookmark': 'bookmark', 'save': 'bookmark',
+    'tag': 'tag', 'label': 'tag',
+    'cart': 'cart', 'shopping': 'cart', 'bag': 'bag',
+    'credit-card': 'creditcard', 'payment': 'creditcard',
+    'dollar': 'dollarsign.circle', 'money': 'dollarsign.circle',
+    'chart': 'chart.bar', 'analytics': 'chart.bar', 'graph': 'chart.bar',
+    'trending': 'chart.line.uptrend.xyaxis',
+    'fire': 'flame', 'hot': 'flame', 'trending': 'flame',
+    'bolt': 'bolt', 'lightning': 'bolt', 'flash': 'bolt',
+    'shield': 'shield', 'security': 'shield',
+    'key': 'key',
+    'logout': 'rectangle.portrait.and.arrow.right', 'signout': 'rectangle.portrait.and.arrow.right',
+    'login': 'rectangle.portrait.and.arrow.forward', 'signin': 'rectangle.portrait.and.arrow.forward',
+}
+
+
+def sanitize_component_name(name: str) -> str:
+    """Convert Figma frame name to valid component name.
+
+    'iPhone 13 & 14 - 241' -> 'Screen241'
+    'Effects screen' -> 'EffectsScreen'
+    'Login Page' -> 'LoginPage'
+    """
+    # Remove device names
+    cleaned = re.sub(r'(?i)iphone\s*\d+\s*[&/,]*\s*\d*\s*[-\u2013]\s*', '', name)
+    cleaned = re.sub(r'(?i)ipad\s*\w*\s*[-\u2013]\s*', '', cleaned)
+    cleaned = re.sub(r'(?i)android\s*\w*\s*[-\u2013]\s*', '', cleaned)
+    cleaned = cleaned.strip(' -\u2013')
+
+    if not cleaned:
+        cleaned = name  # Fallback to original
+
+    # PascalCase conversion
+    words = re.split(r'[\s_\-\u2013/&]+', cleaned)
+    pascal = ''.join(w.capitalize() for w in words if w)
+
+    # Remove non-alphanumeric chars
+    pascal = re.sub(r'[^a-zA-Z0-9]', '', pascal)
+
+    # Ensure starts with letter
+    if pascal and not pascal[0].isalpha():
+        pascal = 'Screen' + pascal
+
+    return pascal or 'GeneratedView'
+
+
+def map_icon_name(figma_name: str) -> str:
+    """Map Figma icon name to SF Symbols name.
+
+    'solar:settings-linear' -> 'gearshape'
+    'mdi:heart' -> 'heart.fill'
+    'eye' -> 'eye'
+    """
+    # Strip icon library prefix (e.g., "solar:", "mdi:", "lucide:")
+    clean = figma_name.split(':')[-1] if ':' in figma_name else figma_name
+    # Remove common suffixes
+    clean = re.sub(r'[-_](linear|outline|filled|bold|solid|regular|light|thin|duotone|broken)$', '', clean, flags=re.IGNORECASE)
+    clean = clean.lower().strip().replace('_', '-').replace(' ', '-')
+
+    # Direct match
+    if clean in ICON_NAME_MAP:
+        return ICON_NAME_MAP[clean]
+
+    # Partial match - check if any key is contained in the name
+    for key, symbol in ICON_NAME_MAP.items():
+        if key in clean:
+            return symbol
+
+    return 'square.dashed'  # Fallback: recognizable placeholder
+
 
 SWIFTUI_WEIGHT_MAP = {
     100: '.ultraLight', 200: '.thin', 300: '.light', 400: '.regular',

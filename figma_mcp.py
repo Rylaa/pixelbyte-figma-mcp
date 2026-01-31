@@ -33,6 +33,7 @@ from generators.react_generator import generate_react_code as _generate_react_co
 from generators.vue_generator import generate_vue_code as _generate_vue_code
 from generators.css_generator import generate_css_code as _generate_css_code, generate_scss_code as _generate_scss_code
 from generators.kotlin_generator import generate_kotlin_code as _generate_kotlin_code
+from generators.base import sanitize_component_name as _sanitize_component_name
 
 
 # ============================================================================
@@ -75,7 +76,7 @@ FigmaNodeIdList = Annotated[List[str], BeforeValidator(_normalize_node_ids)]
 # ============================================================================
 
 FIGMA_API_BASE = "https://api.figma.com/v1"
-CHARACTER_LIMIT = 50000
+CHARACTER_LIMIT = 80000
 DEFAULT_TIMEOUT = 30.0
 
 # Retry configuration for network errors
@@ -138,7 +139,7 @@ MAX_NATIVE_CHILDREN_LIMIT = 10  # Limit for SwiftUI/Kotlin to avoid excessive co
 # Initialize MCP Server
 # ============================================================================
 
-SERVER_VERSION = "3.0.1"
+SERVER_VERSION = "3.1.0"
 
 mcp = FastMCP("figma_mcp")
 
@@ -3613,19 +3614,21 @@ async def figma_get_node_details(params: FigmaNodeInput) -> str:
                 lines.append(f"- **CSS:** `font: {w} {sz}px{lh} '{fam}', sans-serif;`")
             lines.append("")
 
-        # CSS Ready Section
-        css_ready = _build_css_ready_section(node_details)
-        if css_ready:
-            lines.append("## CSS Ready")
-            lines.append("```css")
-            css_props = {k: v for k, v in css_ready.items() if not k.endswith('-note')}
-            for prop, value in css_props.items():
-                lines.append(f"  {prop}: {value};")
-            lines.append("```")
-            notes = {k: v for k, v in css_ready.items() if k.endswith('-note')}
-            for note_key, note_value in notes.items():
-                lines.append(f"> Note: {note_value}")
-            lines.append("")
+        # CSS Ready Section (only for CSS-based frameworks)
+        hint_framework = params.framework or 'css'
+        if hint_framework not in ('swiftui', 'kotlin'):
+            css_ready = _build_css_ready_section(node_details)
+            if css_ready:
+                lines.append("## CSS Ready")
+                lines.append("```css")
+                css_props = {k: v for k, v in css_ready.items() if not k.endswith('-note')}
+                for prop, value in css_props.items():
+                    lines.append(f"  {prop}: {value};")
+                lines.append("```")
+                notes = {k: v for k, v in css_ready.items() if k.endswith('-note')}
+                for note_key, note_value in notes.items():
+                    lines.append(f"> Note: {note_value}")
+                lines.append("")
 
         # Implementation Hints
         if 'implementationHints' in node_details:
@@ -4237,10 +4240,7 @@ async def figma_generate_code(params: FigmaCodeGenInput) -> str:
             return f"Error: Node '{params.node_id}' not found."
 
         # Generate component name
-        component_name = params.component_name or node.get('name', 'Component')
-        component_name = re.sub(r'[^a-zA-Z0-9]', '', component_name.title())
-        if not component_name[0].isalpha():
-            component_name = 'Component' + component_name
+        component_name = params.component_name or _sanitize_component_name(node.get('name', 'Component'))
 
         # Generate code based on framework
         if params.framework in [CodeFramework.REACT, CodeFramework.REACT_TAILWIND]:

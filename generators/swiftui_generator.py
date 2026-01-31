@@ -17,6 +17,7 @@ from generators.base import (
     ColorValue, GradientDef, GradientStop, FillLayer, StrokeInfo, CornerRadii,
     ShadowEffect, BlurEffect, LayoutInfo, TextStyle, StyleBundle,
     SWIFTUI_WEIGHT_MAP, MAX_NATIVE_CHILDREN_LIMIT, MAX_DEPTH,
+    sanitize_component_name, map_icon_name,
 )
 
 
@@ -28,7 +29,9 @@ from generators.base import (
 def _generate_swiftui_node(node: Dict[str, Any], indent: int = 8, depth: int = 0) -> str:
     """Recursively generate SwiftUI code for a single node with full property support."""
     if depth > MAX_DEPTH:
-        return ''
+        prefix = ' ' * indent
+        name = node.get('name', 'Unknown')
+        return f'{prefix}// Depth limit reached: {name}'
 
     node_type = node.get('type', '')
     name = node.get('name', 'Unknown')
@@ -38,7 +41,7 @@ def _generate_swiftui_node(node: Dict[str, Any], indent: int = 8, depth: int = 0
         return _swiftui_text_node(node, indent)
     elif node_type in ('RECTANGLE', 'ELLIPSE', 'LINE', 'STAR', 'REGULAR_POLYGON'):
         return _swiftui_shape_node(node, indent)
-    elif node_type == 'VECTOR':
+    elif node_type in ('VECTOR', 'BOOLEAN_OPERATION'):
         return _swiftui_vector_node(node, indent)
     elif node_type in ('FRAME', 'GROUP', 'COMPONENT', 'COMPONENT_SET', 'INSTANCE', 'SECTION'):
         return _swiftui_container_node(node, indent, depth)
@@ -69,7 +72,7 @@ def _swiftui_fill_modifier(node: Dict[str, Any]) -> tuple[str, str]:
     # Multi-fill - use ZStack layering via .background
     bg_parts = []
     grad_defs = []
-    for layer in reversed(fill_layers):  # bottom-to-top in Figma
+    for layer in fill_layers:  # Figma fills are bottom-to-top; ZStack renders last-on-top
         code, grad_def = _fill_layer_to_swiftui(layer)
         if code:
             bg_parts.append(code)
@@ -223,7 +226,8 @@ def _swiftui_stroke_modifier(node: Dict[str, Any]) -> str:
 
         return (f".overlay(\n"
                 f"            RoundedRectangle(cornerRadius: {cr})\n"
-                f"                .stroke({grad_code}, lineWidth: {stroke.weight})\n"
+                f"                .stroke(style: StrokeStyle(lineWidth: {stroke.weight}))\n"
+                f"                .foregroundStyle({grad_code})\n"
                 f"        )")
 
     return ''
@@ -510,15 +514,10 @@ def _swiftui_shape_node(node: Dict[str, Any], indent: int) -> str:
     if fill_code:
         lines.append(f'{prefix}    {fill_code}')
 
-    # Stroke
-    stroke_data = parse_stroke(node)
-    if stroke_data and stroke_data.weight and stroke_data.colors:
-        first_color = stroke_data.colors[0]
-        if first_color.type == 'SOLID' and first_color.color:
-            hex_c = first_color.color.hex
-            rgb = hex_to_rgb(hex_c)
-            weight = stroke_data.weight
-            lines.append(f'{prefix}    .stroke(Color(red: {rgb[0]/255:.3f}, green: {rgb[1]/255:.3f}, blue: {rgb[2]/255:.3f}), lineWidth: {weight})')
+    # Stroke (supports solid, gradient, and dashed borders)
+    stroke_mod = _swiftui_stroke_modifier(node)
+    if stroke_mod:
+        lines.append(f'{prefix}    {stroke_mod}')
 
     # Frame
     bbox = node.get('absoluteBoundingBox', {})
@@ -562,7 +561,8 @@ def _swiftui_vector_node(node: Dict[str, Any], indent: int) -> str:
     # Check if it looks like an icon
     is_icon = w <= 48 and h <= 48
     if is_icon:
-        return f'{prefix}Image(systemName: "{name.lower().replace(" ", ".")}") // Replace with actual icon\n{prefix}    .frame(width: {w}, height: {h})'
+        sf_symbol = map_icon_name(name)
+        return f'{prefix}Image(systemName: "{sf_symbol}") // {name}\n{prefix}    .frame(width: {w}, height: {h})'
 
     return f'{prefix}// Vector: {name}\n{prefix}Rectangle()\n{prefix}    .frame(width: {w}, height: {h})'
 
@@ -607,11 +607,31 @@ def _swiftui_container_node(node: Dict[str, Any], indent: int, depth: int) -> st
     if not children:
         return _swiftui_empty_container(node, indent)
 
-    # Open container
-    lines.append(f'{prefix}{container}({params_str}) {{')
-
     # Filter visible children for SPACE_BETWEEN logic
     visible_children = [c for c in children if c.get('visible', True)]
+
+    # Detect horizontal overflow → wrap in ScrollView(.horizontal)
+    needs_scroll = False
+    if container == 'HStack' and node.get('clipsContent', False):
+        container_bbox = node.get('absoluteBoundingBox', {})
+        container_w = container_bbox.get('width', 0)
+        if container_w > 0:
+            children_total_w = sum(
+                c.get('absoluteBoundingBox', {}).get('width', 0)
+                for c in visible_children
+                if c.get('absoluteBoundingBox')
+            )
+            # Account for gaps between children
+            children_total_w += gap * max(0, len(visible_children) - 1)
+            if children_total_w > container_w * 1.05:  # 5% tolerance
+                needs_scroll = True
+
+    if needs_scroll:
+        lines.append(f'{prefix}ScrollView(.horizontal, showsIndicators: false) {{')
+        lines.append(f'{prefix}    {container}({params_str}) {{')
+    else:
+        # Open container
+        lines.append(f'{prefix}{container}({params_str}) {{')
 
     # Render children recursively
     child_count = 0
@@ -627,7 +647,11 @@ def _swiftui_container_node(node: Dict[str, Any], indent: int, depth: int) -> st
                 lines.append(f'{prefix}    Spacer()')
 
     # Close container
-    lines.append(f'{prefix}}}')
+    if needs_scroll:
+        lines.append(f'{prefix}    }}')  # close HStack
+        lines.append(f'{prefix}}}')      # close ScrollView
+    else:
+        lines.append(f'{prefix}}}')
 
     # Collect and apply modifiers
     modifiers, gradient_def = _swiftui_collect_modifiers(node)
@@ -677,33 +701,7 @@ def _swiftui_empty_container(node: Dict[str, Any], indent: int) -> str:
 # Component name sanitizer
 # ---------------------------------------------------------------------------
 
-def _sanitize_component_name(name: str) -> str:
-    """Convert Figma frame name to valid SwiftUI struct name.
-    'iPhone 13 & 14 - 241' -> 'Screen241'
-    'Effects screen' -> 'EffectsScreen'
-    'Login Page' -> 'LoginPage'
-    """
-    # Remove device names
-    cleaned = re.sub(r'(?i)iphone\s*\d+\s*[&/,]*\s*\d*\s*[-\u2013]\s*', '', name)
-    cleaned = re.sub(r'(?i)ipad\s*\w*\s*[-\u2013]\s*', '', cleaned)
-    cleaned = re.sub(r'(?i)android\s*\w*\s*[-\u2013]\s*', '', cleaned)
-    cleaned = cleaned.strip(' -\u2013')
-
-    if not cleaned:
-        cleaned = name  # Fallback to original
-
-    # PascalCase conversion
-    words = re.split(r'[\s_\-\u2013/&]+', cleaned)
-    pascal = ''.join(w.capitalize() for w in words if w)
-
-    # Remove non-alphanumeric chars
-    pascal = re.sub(r'[^a-zA-Z0-9]', '', pascal)
-
-    # Ensure starts with letter
-    if pascal and not pascal[0].isalpha():
-        pascal = 'Screen' + pascal
-
-    return pascal or 'GeneratedView'
+_sanitize_component_name = sanitize_component_name  # Use shared sanitizer from base
 
 
 # ---------------------------------------------------------------------------
