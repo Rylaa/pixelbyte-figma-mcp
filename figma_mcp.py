@@ -1489,7 +1489,7 @@ def _extract_size_constraints(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return constraints if constraints else None
 
 
-def _generate_implementation_hints(node: Dict[str, Any], interactions: Optional[List] = None) -> Dict[str, Any]:
+def _generate_implementation_hints(node: Dict[str, Any], interactions: Optional[List] = None, framework: str = 'css') -> Dict[str, Any]:
     """Generate AI-friendly implementation hints based on node analysis.
 
     Provides guidance for layout, responsiveness, interactions, accessibility,
@@ -1507,30 +1507,78 @@ def _generate_implementation_hints(node: Dict[str, Any], interactions: Optional[
     layout_mode = node.get('layoutMode')
 
     # Layout hints
+    spacing = node.get('itemSpacing', 0)
     if layout_mode:
-        direction = 'row' if layout_mode == 'HORIZONTAL' else 'column'
-        layout_hints.append(f"Use flexbox with flex-direction: {direction}")
+        if framework in ('swiftui',):
+            if layout_mode == 'VERTICAL':
+                layout_hints.append(f"Use VStack with spacing: {spacing}")
+            elif layout_mode == 'HORIZONTAL':
+                layout_hints.append(f"Use HStack with spacing: {spacing}")
 
-        # Check for wrapping
-        if node.get('layoutWrap') == 'WRAP':
-            layout_hints.append("Enable flex-wrap for responsive wrapping")
+            # Check for wrapping
+            if node.get('layoutWrap') == 'WRAP':
+                layout_hints.append("Use LazyVGrid or custom flow layout for wrapping")
 
-        # Check for alignment
-        primary_align = node.get('primaryAxisAlignItems', 'MIN')
-        counter_align = node.get('counterAxisAlignItems', 'MIN')
-        if primary_align == 'SPACE_BETWEEN':
-            layout_hints.append("Use justify-content: space-between for distributed spacing")
-        elif primary_align == 'CENTER':
-            layout_hints.append("Center items along main axis")
-        if counter_align == 'CENTER':
-            layout_hints.append("Center items along cross axis")
+            # Alignment
+            primary_align = node.get('primaryAxisAlignItems', 'MIN')
+            counter_align = node.get('counterAxisAlignItems', 'MIN')
+            if primary_align == 'SPACE_BETWEEN':
+                layout_hints.append("Use Spacer() between items for distributed spacing")
+            elif primary_align == 'CENTER':
+                layout_hints.append("Center items along main axis with alignment: .center")
+            if counter_align == 'CENTER':
+                layout_hints.append("Center items along cross axis with alignment: .center")
+
+        elif framework in ('kotlin',):
+            if layout_mode == 'VERTICAL':
+                layout_hints.append(f"Use Column with verticalArrangement spacedBy {spacing}.dp")
+            elif layout_mode == 'HORIZONTAL':
+                layout_hints.append(f"Use Row with horizontalArrangement spacedBy {spacing}.dp")
+
+            # Check for wrapping
+            if node.get('layoutWrap') == 'WRAP':
+                layout_hints.append("Use FlowRow or FlowColumn for wrapping layout")
+
+            # Alignment
+            primary_align = node.get('primaryAxisAlignItems', 'MIN')
+            counter_align = node.get('counterAxisAlignItems', 'MIN')
+            if primary_align == 'SPACE_BETWEEN':
+                layout_hints.append("Use Arrangement.SpaceBetween for distributed spacing")
+            elif primary_align == 'CENTER':
+                layout_hints.append("Center items along main axis with Arrangement.Center")
+            if counter_align == 'CENTER':
+                layout_hints.append("Center items along cross axis with Alignment.CenterHorizontally/CenterVertically")
+
+        else:
+            # Default CSS hints
+            direction = 'row' if layout_mode == 'HORIZONTAL' else 'column'
+            layout_hints.append(f"Use flexbox with flex-direction: {direction}")
+
+            # Check for wrapping
+            if node.get('layoutWrap') == 'WRAP':
+                layout_hints.append("Enable flex-wrap for responsive wrapping")
+
+            # Check for alignment
+            primary_align = node.get('primaryAxisAlignItems', 'MIN')
+            counter_align = node.get('counterAxisAlignItems', 'MIN')
+            if primary_align == 'SPACE_BETWEEN':
+                layout_hints.append("Use justify-content: space-between for distributed spacing")
+            elif primary_align == 'CENTER':
+                layout_hints.append("Center items along main axis")
+            if counter_align == 'CENTER':
+                layout_hints.append("Center items along cross axis")
 
     # Check for grid-like layouts (multiple children with same size)
     children = node.get('children', [])
     if len(children) >= 3:
         child_widths = [c.get('absoluteBoundingBox', {}).get('width', 0) for c in children if c.get('absoluteBoundingBox')]
         if child_widths and len(set(round(w) for w in child_widths)) == 1:
-            layout_hints.append(f"Consider CSS Grid with {len(children)}-column layout")
+            if framework in ('swiftui',):
+                layout_hints.append(f"Consider LazyVGrid with {len(children)}-column GridItem layout")
+            elif framework in ('kotlin',):
+                layout_hints.append(f"Consider LazyVerticalGrid with {len(children)} columns")
+            else:
+                layout_hints.append(f"Consider CSS Grid with {len(children)}-column layout")
 
     # Responsive hints based on size
     bbox = node.get('absoluteBoundingBox', {})
