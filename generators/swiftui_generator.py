@@ -235,16 +235,16 @@ def _swiftui_corner_modifier(node: Dict[str, Any]) -> str:
     if not radii:
         return ''
 
-    if radii.get('isUniform'):
-        tl = radii['topLeft']
+    if radii.is_uniform:
+        tl = radii.top_left
         if tl > 0:
             return f".cornerRadius({int(tl)})"
         return ''
     else:
-        tl = int(radii['topLeft'])
-        tr = int(radii['topRight'])
-        br = int(radii['bottomRight'])
-        bl = int(radii['bottomLeft'])
+        tl = int(radii.top_left)
+        tr = int(radii.top_right)
+        br = int(radii.bottom_right)
+        bl = int(radii.bottom_left)
         return f".clipShape(RoundedCorner(topLeft: {tl}, topRight: {tr}, bottomRight: {br}, bottomLeft: {bl}))"
 
 
@@ -466,8 +466,8 @@ def _swiftui_shape_node(node: Dict[str, Any], indent: int) -> str:
     else:
         # Rectangle, Star, Polygon - use RoundedRectangle if has corner radius
         corner_radii = parse_corners(node)
-        if corner_radii and corner_radii.get('isUniform') and corner_radii['topLeft'] > 0:
-            shape_name = f"RoundedRectangle(cornerRadius: {int(corner_radii['topLeft'])})"
+        if corner_radii and corner_radii.is_uniform and corner_radii.top_left > 0:
+            shape_name = f"RoundedRectangle(cornerRadius: {int(corner_radii.top_left)})"
         else:
             shape_name = 'Rectangle'
 
@@ -512,12 +512,12 @@ def _swiftui_shape_node(node: Dict[str, Any], indent: int) -> str:
 
     # Stroke
     stroke_data = parse_stroke(node)
-    if stroke_data and stroke_data.get('weight') and stroke_data.get('colors'):
-        first_color = stroke_data['colors'][0]
-        if first_color.get('type') == 'SOLID':
-            hex_c = first_color.get('hex', '#000000')
+    if stroke_data and stroke_data.weight and stroke_data.colors:
+        first_color = stroke_data.colors[0]
+        if first_color.type == 'SOLID' and first_color.color:
+            hex_c = first_color.color.hex
             rgb = hex_to_rgb(hex_c)
-            weight = stroke_data['weight']
+            weight = stroke_data.weight
             lines.append(f'{prefix}    .stroke(Color(red: {rgb[0]/255:.3f}, green: {rgb[1]/255:.3f}, blue: {rgb[2]/255:.3f}), lineWidth: {weight})')
 
     # Frame
@@ -528,11 +528,11 @@ def _swiftui_shape_node(node: Dict[str, Any], indent: int) -> str:
 
     # Non-uniform corner radius (clip shape)
     corner_radii = parse_corners(node)
-    if corner_radii and not corner_radii.get('isUniform'):
-        tl = int(corner_radii['topLeft'])
-        tr = int(corner_radii['topRight'])
-        br = int(corner_radii['bottomRight'])
-        bl = int(corner_radii['bottomLeft'])
+    if corner_radii and not corner_radii.is_uniform:
+        tl = int(corner_radii.top_left)
+        tr = int(corner_radii.top_right)
+        br = int(corner_radii.bottom_right)
+        bl = int(corner_radii.bottom_left)
         lines.append(f'{prefix}    .clipShape(RoundedCorner(topLeft: {tl}, topRight: {tr}, bottomRight: {br}, bottomLeft: {bl}))')
 
     # Effects & appearance

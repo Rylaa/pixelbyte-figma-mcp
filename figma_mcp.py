@@ -138,6 +138,8 @@ MAX_NATIVE_CHILDREN_LIMIT = 10  # Limit for SwiftUI/Kotlin to avoid excessive co
 # Initialize MCP Server
 # ============================================================================
 
+SERVER_VERSION = "3.0.1"
+
 mcp = FastMCP("figma_mcp")
 
 # ============================================================================
@@ -216,6 +218,10 @@ class FigmaNodeInput(BaseModel):
 
     file_key: FigmaFileKey = Field(..., description="Figma file key")
     node_id: FigmaNodeId = Field(..., description="Node ID (e.g., '1:2' or '1-2')")
+    framework: Optional[str] = Field(
+        default=None,
+        description="Target framework for implementation hints: 'css', 'swiftui', 'kotlin'. If not provided, defaults to 'css'."
+    )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN,
         description="Output format"
@@ -524,6 +530,27 @@ async def _make_figma_request(
     raise last_exception
 
 
+def _with_version(response: str) -> str:
+    """Append server version footer to tool responses."""
+    return f"{response}\n\n---\n_MCP Server v{SERVER_VERSION}_"
+
+
+def _versioned_tool(*args, **kwargs):
+    """Decorator that wraps mcp.tool() and appends server version to responses."""
+    def decorator(func):
+        import functools
+
+        @functools.wraps(func)
+        async def wrapper(*fn_args, **fn_kwargs):
+            result = await func(*fn_args, **fn_kwargs)
+            if isinstance(result, str):
+                return _with_version(result)
+            return result
+
+        return mcp.tool(*args, **kwargs)(wrapper)
+    return decorator
+
+
 def _handle_api_error(e: Exception) -> str:
     """Format API errors for user-friendly messages."""
     if isinstance(e, httpx.HTTPStatusError):
@@ -792,6 +819,133 @@ def _extract_corner_radii(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         }
 
     return None
+
+
+def _extract_children_summary(children: List[Dict[str, Any]], depth: int = 0, max_depth: int = 2) -> List[Dict[str, Any]]:
+    """Extract summary information for child nodes up to max_depth.
+
+    Depth 0 (direct children): name, type, id, size, fills summary, text content, child count
+    Depth 1 (grandchildren): name, type, id, size, child count
+    """
+    MAX_CHILDREN_PER_LEVEL = 30
+    summaries = []
+
+    for child in children[:MAX_CHILDREN_PER_LEVEL]:
+        if not child.get('visible', True):
+            continue
+
+        summary: Dict[str, Any] = {
+            'name': child.get('name', 'Unknown'),
+            'type': child.get('type', 'UNKNOWN'),
+            'id': child.get('id', ''),
+        }
+
+        # Size from bounding box
+        bbox = child.get('absoluteBoundingBox')
+        if bbox:
+            summary['width'] = round(bbox.get('width', 0), 1)
+            summary['height'] = round(bbox.get('height', 0), 1)
+
+        # Depth 0 gets richer details
+        if depth == 0:
+            # Fills summary (compact)
+            fills = child.get('fills', [])
+            visible_fills = [f for f in fills if f.get('visible', True)]
+            if visible_fills:
+                fill_summary = []
+                for f in visible_fills[:3]:
+                    f_type = f.get('type', '')
+                    if f_type == 'SOLID':
+                        color = f.get('color', {})
+                        hex_color = '#{:02x}{:02x}{:02x}'.format(
+                            int(color.get('r', 0) * 255),
+                            int(color.get('g', 0) * 255),
+                            int(color.get('b', 0) * 255)
+                        )
+                        fill_summary.append(hex_color)
+                    elif 'GRADIENT' in f_type:
+                        fill_summary.append(f_type.replace('GRADIENT_', '').lower() + ' gradient')
+                    elif f_type == 'IMAGE':
+                        fill_summary.append('image')
+                if fill_summary:
+                    summary['fills'] = fill_summary
+
+            # Text content
+            if child.get('type') == 'TEXT':
+                chars = child.get('characters', '')
+                if chars:
+                    summary['text'] = chars[:100] + ('...' if len(chars) > 100 else '')
+
+            # Auto-layout info
+            layout_mode = child.get('layoutMode')
+            if layout_mode and layout_mode != 'NONE':
+                summary['layoutMode'] = layout_mode
+                gap = child.get('itemSpacing', 0)
+                if gap:
+                    summary['gap'] = gap
+
+        # Recurse into grandchildren
+        grandchildren = child.get('children', [])
+        if grandchildren:
+            summary['childrenCount'] = len(grandchildren)
+            if depth < max_depth - 1:
+                summary['children'] = _extract_children_summary(grandchildren, depth + 1, max_depth)
+
+        summaries.append(summary)
+
+    if len(children) > MAX_CHILDREN_PER_LEVEL:
+        summaries.append({
+            '_truncated': True,
+            '_message': f'{len(children) - MAX_CHILDREN_PER_LEVEL} more children not shown.'
+        })
+
+    return summaries
+
+
+def _render_children_markdown(lines: List[str], children: List[Dict[str, Any]], indent: int = 0) -> None:
+    """Render children summary list as markdown."""
+    prefix = '  ' * indent
+    for child in children:
+        if child.get('_truncated'):
+            lines.append(f"{prefix}- _{child.get('_message', 'truncated')}_")
+            continue
+
+        name = child.get('name', 'Unknown')
+        node_type = child.get('type', '')
+        node_id = child.get('id', '')
+        w = child.get('width', 0)
+        h = child.get('height', 0)
+
+        # Main line: name, type, size
+        size_str = f" ({w}x{h})" if w or h else ""
+        line = f"{prefix}- **{name}** `{node_type}` `{node_id}`{size_str}"
+        lines.append(line)
+
+        # Fills (depth-0 only)
+        fills = child.get('fills')
+        if fills:
+            lines.append(f"{prefix}  - Fills: {', '.join(str(f) for f in fills)}")
+
+        # Text content
+        text = child.get('text')
+        if text:
+            lines.append(f'{prefix}  - Text: "{text}"')
+
+        # Layout
+        layout = child.get('layoutMode')
+        if layout:
+            gap = child.get('gap', 0)
+            gap_str = f", gap: {gap}" if gap else ""
+            lines.append(f"{prefix}  - Layout: {layout}{gap_str}")
+
+        # Recurse into grandchildren
+        sub_children = child.get('children')
+        if sub_children:
+            _render_children_markdown(lines, sub_children, indent + 1)
+        elif child.get('childrenCount', 0) > 0:
+            lines.append(f"{prefix}  - Children: {child['childrenCount']} node(s)")
+
+    lines.append("")
 
 
 def _extract_constraints(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2861,7 +3015,7 @@ def _node_to_simplified_tree(
 # MCP Tools
 # ============================================================================
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_get_file_structure",
     annotations={
         "title": "Get Figma File Structure",
@@ -2961,7 +3115,7 @@ async def figma_get_file_structure(params: FigmaFileInput) -> str:
         return _handle_api_error(e)
 
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_get_node_details",
     annotations={
         "title": "Get Figma Node Details",
@@ -3176,7 +3330,8 @@ async def figma_get_node_details(params: FigmaNodeInput) -> str:
             node_details['text'] = {k: v for k, v in node_details['text'].items() if v is not None}
 
         # Implementation hints (AI-friendly guidance)
-        impl_hints = _generate_implementation_hints(node, interactions)
+        hint_framework = params.framework or 'css'
+        impl_hints = _generate_implementation_hints(node, interactions, framework=hint_framework)
         if impl_hints:
             node_details['implementationHints'] = impl_hints
 
@@ -3185,10 +3340,11 @@ async def figma_get_node_details(params: FigmaNodeInput) -> str:
         if a11y_issues:
             node_details['accessibility'] = a11y_issues
 
-        # Children count
+        # Children with depth-2 traversal
         children = node.get('children', [])
         if children:
             node_details['childrenCount'] = len(children)
+            node_details['children'] = _extract_children_summary(children, depth=0, max_depth=2)
 
         if params.response_format == ResponseFormat.JSON:
             return json.dumps(node_details, indent=2)
@@ -3523,8 +3679,12 @@ async def figma_get_node_details(params: FigmaNodeInput) -> str:
                         lines.append(f"  - WCAG: {issue['wcag']}")
             lines.append("")
 
-        # Children count
-        if 'childrenCount' in node_details:
+        # Children
+        if 'children' in node_details:
+            lines.append(f"## Children ({node_details.get('childrenCount', 0)} nodes)")
+            lines.append("")
+            _render_children_markdown(lines, node_details['children'], indent=0)
+        elif 'childrenCount' in node_details:
             lines.append(f"**Children:** {node_details['childrenCount']} child node(s)")
 
         return "\n".join(lines)
@@ -3533,7 +3693,7 @@ async def figma_get_node_details(params: FigmaNodeInput) -> str:
         return _handle_api_error(e)
 
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_get_screenshot",
     annotations={
         "title": "Get Figma Screenshot",
@@ -3630,7 +3790,7 @@ async def figma_get_screenshot(params: FigmaScreenshotInput) -> str:
         return _handle_api_error(e)
 
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_get_design_tokens",
     annotations={
         "title": "Extract Design Tokens",
@@ -3760,7 +3920,7 @@ async def figma_get_design_tokens(params: FigmaDesignTokensInput) -> str:
 
             # Step 2: If still too large, limit each token category
             if len(result) > CHARACTER_LIMIT:
-                max_per_category = 30
+                max_per_category = 100
                 if isinstance(formatted_tokens.get('tokens'), dict):
                     for key in formatted_tokens['tokens']:
                         if isinstance(formatted_tokens['tokens'][key], list) and len(formatted_tokens['tokens'][key]) > max_per_category:
@@ -3788,7 +3948,7 @@ async def figma_get_design_tokens(params: FigmaDesignTokensInput) -> str:
         return _handle_api_error(e)
 
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_get_styles",
     annotations={
         "title": "Get Published Styles",
@@ -4031,7 +4191,7 @@ async def figma_get_styles(params: FigmaStylesInput) -> str:
         return _handle_api_error(e)
 
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_generate_code",
     annotations={
         "title": "Generate Code from Figma",
@@ -4147,7 +4307,7 @@ async def figma_generate_code(params: FigmaCodeGenInput) -> str:
 # Code Connect Tools
 # ============================================================================
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_get_code_connect_map",
     annotations={
         "title": "Get Code Connect Mappings",
@@ -4223,7 +4383,7 @@ async def figma_get_code_connect_map(params: FigmaCodeConnectGetInput) -> str:
         }, indent=2)
 
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_add_code_connect_map",
     annotations={
         "title": "Add Code Connect Mapping",
@@ -4308,7 +4468,7 @@ async def figma_add_code_connect_map(params: FigmaCodeConnectAddInput) -> str:
         }, indent=2)
 
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_remove_code_connect_map",
     annotations={
         "title": "Remove Code Connect Mapping",
@@ -4376,7 +4536,7 @@ async def figma_remove_code_connect_map(params: FigmaCodeConnectRemoveInput) -> 
 # Asset Management Tools
 # ============================================================================
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_list_assets",
     annotations={
         "title": "List Assets in Figma Design",
@@ -4548,7 +4708,7 @@ async def figma_list_assets(params: FigmaListAssetsInput) -> str:
         return _handle_api_error(e)
 
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_get_images",
     annotations={
         "title": "Get Image Fill URLs",
@@ -4685,7 +4845,7 @@ async def figma_get_images(params: FigmaGetImagesInput) -> str:
         return _handle_api_error(e)
 
 
-@mcp.tool(
+@_versioned_tool(
     name="figma_export_assets",
     annotations={
         "title": "Export Assets from Figma",
