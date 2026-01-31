@@ -363,22 +363,12 @@ def _swiftui_collect_modifiers(node: Dict[str, Any], include_frame: bool = True)
 # ---------------------------------------------------------------------------
 
 def _swiftui_text_node(node: Dict[str, Any], indent: int) -> str:
-    """Generate SwiftUI Text view with full styling."""
+    """Generate SwiftUI Text view with full styling including gradient text."""
     prefix = ' ' * indent
     lines = []
 
     text = node.get('characters', node.get('name', ''))
-    style = node.get('style', {})
-    fills = node.get('fills', [])
-
-    font_size = style.get('fontSize', 16)
-    font_weight = style.get('fontWeight', 400)
-    font_family = style.get('fontFamily', '')
-    line_height = style.get('lineHeightPx')
-    letter_spacing = style.get('letterSpacing', 0)
-    text_align = style.get('textAlignHorizontal', 'LEFT')
-    text_case = style.get('textCase', 'ORIGINAL')
-    text_decoration = style.get('textDecoration', 'NONE')
+    ts = parse_text_style(node)
 
     # Hyperlink
     hyperlink = node.get('hyperlink')
@@ -386,10 +376,10 @@ def _swiftui_text_node(node: Dict[str, Any], indent: int) -> str:
     if hyperlink and hyperlink.get('type') == 'URL':
         hyperlink_url = hyperlink.get('url', '')
 
-    weight = SWIFTUI_WEIGHT_MAP.get(font_weight, '.regular')
-
-    # Escape text for Swift string literal
+    # Escape text
     escaped_text = text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+
+    weight = SWIFTUI_WEIGHT_MAP.get(ts.font_weight, '.regular')
 
     # Text or Link
     if hyperlink_url:
@@ -398,62 +388,62 @@ def _swiftui_text_node(node: Dict[str, Any], indent: int) -> str:
         lines.append(f'{prefix}Text("{escaped_text}")')
 
     # Font
-    if font_family:
-        lines.append(f'{prefix}    .font(.custom("{font_family}", size: {font_size}))')
+    if ts.font_family:
+        lines.append(f'{prefix}    .font(.custom("{ts.font_family}", size: {ts.font_size}))')
         lines.append(f'{prefix}    .fontWeight({weight})')
     else:
-        lines.append(f'{prefix}    .font(.system(size: {font_size}, weight: {weight}))')
+        lines.append(f'{prefix}    .font(.system(size: {ts.font_size}, weight: {weight}))')
 
-    # Text color from fills
-    for fill in fills:
-        if fill.get('visible', True) and fill.get('type') == 'SOLID':
-            color = fill.get('color', {})
-            r, g, b = color.get('r', 0), color.get('g', 0), color.get('b', 0)
-            a = fill.get('opacity', color.get('a', 1))
-            if a < 1:
-                lines.append(f'{prefix}    .foregroundColor(Color(red: {r:.3f}, green: {g:.3f}, blue: {b:.3f}).opacity({a:.2f}))')
-            else:
-                lines.append(f'{prefix}    .foregroundColor(Color(red: {r:.3f}, green: {g:.3f}, blue: {b:.3f}))')
-            break
+    # Text color or gradient
+    if ts.gradient:
+        grad_code, _ = _gradient_to_swiftui(ts.gradient)
+        if grad_code:
+            lines.append(f'{prefix}    .foregroundStyle({grad_code})')
+    elif ts.color:
+        c = ts.color
+        color_code = f"Color(red: {c.r:.3f}, green: {c.g:.3f}, blue: {c.b:.3f})"
+        if c.a < 1:
+            lines.append(f'{prefix}    .foregroundColor({color_code}.opacity({c.a:.2f}))')
+        else:
+            lines.append(f'{prefix}    .foregroundColor({color_code})')
 
-    # Line height (via lineSpacing approximation)
-    if line_height and font_size:
-        line_spacing = line_height - font_size
-        if line_spacing > 0:
-            lines.append(f'{prefix}    .lineSpacing({line_spacing:.1f})')
+    # Line height (approximated via lineSpacing)
+    if ts.line_height and ts.line_height > ts.font_size:
+        spacing = ts.line_height - ts.font_size
+        lines.append(f'{prefix}    .lineSpacing({spacing:.0f})')
 
-    # Letter spacing / tracking
-    if letter_spacing and letter_spacing != 0:
-        lines.append(f'{prefix}    .tracking({letter_spacing:.2f})')
+    # Letter spacing
+    if ts.letter_spacing:
+        lines.append(f'{prefix}    .tracking({ts.letter_spacing:.1f})')
 
     # Text alignment
-    align_map = {'LEFT': '.leading', 'CENTER': '.center', 'RIGHT': '.trailing', 'JUSTIFIED': '.leading'}
-    if text_align in align_map and text_align != 'LEFT':
-        lines.append(f'{prefix}    .multilineTextAlignment({align_map[text_align]})')
+    align_map = {'LEFT': '.leading', 'CENTER': '.center', 'RIGHT': '.trailing'}
+    if ts.text_align in align_map and ts.text_align != 'LEFT':
+        lines.append(f'{prefix}    .multilineTextAlignment({align_map[ts.text_align]})')
 
     # Text case
-    case_map = {'UPPER': '.uppercase', 'LOWER': '.lowercase'}
-    if text_case in case_map:
-        lines.append(f'{prefix}    .textCase({case_map[text_case]})')
+    if ts.text_case == 'UPPER':
+        lines.append(f'{prefix}    .textCase(.uppercase)')
+    elif ts.text_case == 'LOWER':
+        lines.append(f'{prefix}    .textCase(.lowercase)')
 
     # Text decoration
-    if text_decoration == 'UNDERLINE':
+    if ts.text_decoration == 'UNDERLINE':
         lines.append(f'{prefix}    .underline()')
-    elif text_decoration == 'STRIKETHROUGH':
+    elif ts.text_decoration == 'STRIKETHROUGH':
         lines.append(f'{prefix}    .strikethrough()')
 
-    # Max lines
-    max_lines = style.get('maxLines')
-    text_truncation = style.get('textTruncation', 'DISABLED')
-    if max_lines and max_lines > 0:
-        lines.append(f'{prefix}    .lineLimit({max_lines})')
-        if text_truncation == 'ENDING':
+    # Max lines / truncation
+    if ts.max_lines:
+        lines.append(f'{prefix}    .lineLimit({ts.max_lines})')
+        if ts.truncation == 'ENDING':
             lines.append(f'{prefix}    .truncationMode(.tail)')
 
-    # Opacity
-    opacity = node.get('opacity', 1)
-    if opacity < 1:
-        lines.append(f'{prefix}    .opacity({opacity:.2f})')
+    # Frame (width constraint if needed)
+    bbox = node.get('absoluteBoundingBox', {})
+    w = int(bbox.get('width', 0))
+    if w > 0:
+        lines.append(f'{prefix}    .frame(width: {w}, alignment: {align_map.get(ts.text_align, ".leading")})')
 
     return '\n'.join(lines)
 
