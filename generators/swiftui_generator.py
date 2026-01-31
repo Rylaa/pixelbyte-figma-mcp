@@ -51,64 +51,101 @@ def _generate_swiftui_node(node: Dict[str, Any], indent: int = 8, depth: int = 0
 # ---------------------------------------------------------------------------
 
 def _swiftui_fill_modifier(node: Dict[str, Any]) -> tuple[str, str]:
-    """Generate SwiftUI background/fill modifier and any gradient definitions.
-    Returns (modifier_code, gradient_definition).
+    """Generate SwiftUI background modifier supporting multi-fill and all gradient types.
+    Returns (modifier_code, gradient_definitions).
     """
-    fills = node.get('fills', [])
-    modifier = ''
-    gradient_def = ''
+    fill_layers = parse_fills(node)
+    if not fill_layers:
+        return '', ''
 
-    for fill in fills:
-        if not fill.get('visible', True):
-            continue
-        fill_type = fill.get('type', '')
+    # Single fill - simple background
+    if len(fill_layers) == 1:
+        code, grad_def = _fill_layer_to_swiftui(fill_layers[0])
+        if code:
+            return f'.background({code})', grad_def
+        return '', ''
 
-        if fill_type == 'SOLID':
-            color = fill.get('color', {})
-            r, g, b = color.get('r', 0), color.get('g', 0), color.get('b', 0)
-            a = fill.get('opacity', color.get('a', 1))
-            if a < 1:
-                modifier = f'.background(Color(red: {r:.3f}, green: {g:.3f}, blue: {b:.3f}).opacity({a:.2f}))'
-            else:
-                modifier = f'.background(Color(red: {r:.3f}, green: {g:.3f}, blue: {b:.3f}))'
-            break
+    # Multi-fill - use ZStack layering via .background
+    bg_parts = []
+    grad_defs = []
+    for layer in reversed(fill_layers):  # bottom-to-top in Figma
+        code, grad_def = _fill_layer_to_swiftui(layer)
+        if code:
+            bg_parts.append(code)
+            if grad_def:
+                grad_defs.append(grad_def)
 
-        elif fill_type == 'GRADIENT_LINEAR':
-            stops = fill.get('gradientStops', [])
-            if stops:
-                stop_strs = []
-                for stop in stops:
-                    pos = stop.get('position', 0)
-                    c = stop.get('color', {})
-                    stop_strs.append(
-                        f"            .init(color: Color(red: {c.get('r', 0):.3f}, green: {c.get('g', 0):.3f}, blue: {c.get('b', 0):.3f}), location: {pos:.2f})"
-                    )
-                stops_code = ',\n'.join(stop_strs)
-                # Calculate direction from handle positions
-                handles = fill.get('gradientHandlePositions', [])
-                start, end = _gradient_direction_swiftui(handles)
-                gradient_def = f"        let gradient = LinearGradient(\n            stops: [\n{stops_code}\n            ],\n            startPoint: {start},\n            endPoint: {end}\n        )"
-                modifier = '.background(gradient)'
-            break
+    if not bg_parts:
+        return '', ''
 
-        elif fill_type == 'GRADIENT_RADIAL':
-            stops = fill.get('gradientStops', [])
-            if stops:
-                stop_strs = []
-                for stop in stops:
-                    pos = stop.get('position', 0)
-                    c = stop.get('color', {})
-                    stop_strs.append(
-                        f"            .init(color: Color(red: {c.get('r', 0):.3f}, green: {c.get('g', 0):.3f}, blue: {c.get('b', 0):.3f}), location: {pos:.2f})"
-                    )
-                stops_code = ',\n'.join(stop_strs)
-                bbox = node.get('absoluteBoundingBox', {})
-                radius = max(bbox.get('width', 100), bbox.get('height', 100)) / 2
-                gradient_def = f"        let gradient = RadialGradient(\n            stops: [\n{stops_code}\n            ],\n            center: .center,\n            startRadius: 0,\n            endRadius: {radius:.0f}\n        )"
-                modifier = '.background(gradient)'
-            break
+    if len(bg_parts) == 1:
+        return f'.background({bg_parts[0]})', '\n'.join(grad_defs)
 
-    return modifier, gradient_def
+    # Stack multiple fills
+    layers = '\n            '.join(bg_parts)
+    modifier = f""".background(
+            ZStack {{
+                {layers}
+            }}
+        )"""
+    return modifier, '\n'.join(grad_defs)
+
+
+def _fill_layer_to_swiftui(layer: FillLayer) -> tuple[str, str]:
+    """Convert a single FillLayer to SwiftUI code.
+    Returns (view_code, gradient_definition).
+    """
+    if layer.type == 'SOLID' and layer.color:
+        c = layer.color
+        color_code = f"Color(red: {c.r:.3f}, green: {c.g:.3f}, blue: {c.b:.3f})"
+        if c.a < 1:
+            color_code += f".opacity({c.a:.2f})"
+        return color_code, ''
+
+    elif layer.gradient:
+        return _gradient_to_swiftui(layer.gradient)
+
+    elif layer.type == 'IMAGE':
+        return 'Color.gray.opacity(0.3) // Image placeholder', ''
+
+    return '', ''
+
+
+def _gradient_to_swiftui(gradient: GradientDef) -> tuple[str, str]:
+    """Convert GradientDef to SwiftUI gradient code.
+    Returns (gradient_code, gradient_variable_definition).
+    """
+    stops_code = []
+    for stop in gradient.stops:
+        c = stop.color
+        color = f"Color(red: {c.r:.3f}, green: {c.g:.3f}, blue: {c.b:.3f})"
+        if c.a < 1:
+            color += f".opacity({c.a:.2f})"
+        stops_code.append(f".init(color: {color}, location: {stop.position:.4f})")
+
+    stops_str = ', '.join(stops_code)
+
+    if gradient.type == 'LINEAR':
+        start, end = _gradient_direction_swiftui(gradient.handle_positions)
+        code = f"LinearGradient(stops: [{stops_str}], startPoint: {start}, endPoint: {end})"
+
+    elif gradient.type == 'RADIAL':
+        code = f"RadialGradient(stops: [{stops_str}], center: .center, startRadius: 0, endRadius: 200)"
+
+    elif gradient.type == 'ANGULAR':
+        code = f"AngularGradient(stops: [{stops_str}], center: .center)"
+
+    elif gradient.type == 'DIAMOND':
+        # Approximate as radial
+        code = f"RadialGradient(stops: [{stops_str}], center: .center, startRadius: 0, endRadius: 200)"
+
+    else:
+        return '', ''
+
+    if gradient.opacity < 1:
+        code += f".opacity({gradient.opacity:.2f})"
+
+    return code, ''
 
 
 def _gradient_direction_swiftui(handles: list) -> tuple[str, str]:
