@@ -32,7 +32,9 @@ ICON_NAME_MAP = {
     'star': 'star.fill', 'rating': 'star.fill',
     'bell': 'bell', 'notification': 'bell', 'alarm': 'bell',
     'mail': 'envelope', 'email': 'envelope', 'message': 'envelope',
-    'chat': 'bubble.left', 'comment': 'bubble.left',
+    'chat': 'bubble.left', 'comment': 'bubble.left', 'comment-dots': 'bubble.left',
+    'thumbs-up': 'hand.thumbsup', 'thumbsup': 'hand.thumbsup', 'thumb-up': 'hand.thumbsup',
+    'anchor': 'anchor',
     'share': 'square.and.arrow.up', 'export': 'square.and.arrow.up',
     'download': 'arrow.down.circle', 'import': 'arrow.down.circle',
     'upload': 'arrow.up.circle',
@@ -40,10 +42,10 @@ ICON_NAME_MAP = {
     'add': 'plus', 'plus': 'plus', 'create': 'plus',
     'minus': 'minus', 'subtract': 'minus',
     'check': 'checkmark', 'done': 'checkmark', 'tick': 'checkmark',
-    'arrow-left': 'chevron.left', 'back': 'chevron.left', 'chevron-left': 'chevron.left',
-    'arrow-right': 'chevron.right', 'forward': 'chevron.right', 'chevron-right': 'chevron.right',
-    'arrow-up': 'chevron.up', 'chevron-up': 'chevron.up',
-    'arrow-down': 'chevron.down', 'chevron-down': 'chevron.down',
+    'arrow-left': 'arrow.left', 'back': 'chevron.left', 'chevron-left': 'chevron.left',
+    'arrow-right': 'arrow.right', 'forward': 'chevron.right', 'chevron-right': 'chevron.right',
+    'arrow-up': 'arrow.up', 'chevron-up': 'chevron.up',
+    'arrow-down': 'arrow.down', 'chevron-down': 'chevron.down',
     'eye': 'eye', 'view': 'eye', 'visible': 'eye', 'show': 'eye',
     'eye-off': 'eye.slash', 'hide': 'eye.slash', 'invisible': 'eye.slash',
     'lock': 'lock', 'locked': 'lock', 'secure': 'lock',
@@ -78,6 +80,7 @@ ICON_NAME_MAP = {
     'info': 'info.circle', 'about': 'info.circle',
     'help': 'questionmark.circle', 'question': 'questionmark.circle',
     'warning': 'exclamationmark.triangle', 'alert': 'exclamationmark.triangle',
+    'exclamation': 'exclamationmark.triangle.fill',
     'error': 'xmark.circle', 'danger': 'xmark.circle',
     'success': 'checkmark.circle', 'verified': 'checkmark.circle',
     'refresh': 'arrow.clockwise', 'reload': 'arrow.clockwise', 'sync': 'arrow.clockwise',
@@ -91,9 +94,11 @@ ICON_NAME_MAP = {
     'chart': 'chart.bar', 'analytics': 'chart.bar', 'graph': 'chart.bar',
     'trending': 'chart.line.uptrend.xyaxis',
     'fire': 'flame', 'hot': 'flame', 'trending': 'flame',
-    'bolt': 'bolt', 'lightning': 'bolt', 'flash': 'bolt',
+    'bolt': 'bolt', 'lightning': 'bolt', 'flash': 'bolt', 'zap': 'bolt.fill',
     'shield': 'shield', 'security': 'shield',
     'key': 'key',
+    'focus': 'viewfinder', 'focus-mode': 'viewfinder', 'scope': 'viewfinder',
+    'button': 'rectangle.on.rectangle', 'button-solid': 'rectangle.on.rectangle',
     'logout': 'rectangle.portrait.and.arrow.right', 'signout': 'rectangle.portrait.and.arrow.right',
     'login': 'rectangle.portrait.and.arrow.forward', 'signin': 'rectangle.portrait.and.arrow.forward',
 }
@@ -134,10 +139,15 @@ def map_icon_name(figma_name: str) -> str:
 
     'solar:settings-linear' -> 'gearshape'
     'mdi:heart' -> 'heart.fill'
+    'lucide/clock' -> 'clock'
     'eye' -> 'eye'
     """
-    # Strip icon library prefix (e.g., "solar:", "mdi:", "lucide:")
-    clean = figma_name.split(':')[-1] if ':' in figma_name else figma_name
+    # Strip icon library prefix (e.g., "solar:", "mdi:", "lucide:", "lucide/")
+    clean = figma_name
+    if ':' in clean:
+        clean = clean.split(':')[-1]
+    elif '/' in clean:
+        clean = clean.split('/')[-1]
     # Remove common suffixes
     clean = re.sub(r'[-_](linear|outline|filled|bold|solid|regular|light|thin|duotone|broken)$', '', clean, flags=re.IGNORECASE)
     clean = clean.lower().strip().replace('_', '-').replace(' ', '-')
@@ -147,8 +157,10 @@ def map_icon_name(figma_name: str) -> str:
         return ICON_NAME_MAP[clean]
 
     # Partial match - check if any key is contained in the name
-    for key, symbol in ICON_NAME_MAP.items():
-        if key in clean:
+    # Require min 3 chars to avoid single-char false positives (e.g., 'x' in 'text')
+    # Sort by key length descending for longest match first
+    for key, symbol in sorted(ICON_NAME_MAP.items(), key=lambda x: len(x[0]), reverse=True):
+        if len(key) >= 3 and key in clean:
             return symbol
 
     return 'square.dashed'  # Fallback: recognizable placeholder
@@ -425,11 +437,16 @@ def parse_stroke(node: Dict[str, Any]) -> Optional[StrokeInfo]:
         return None
 
     colors = []
+    stroke_item_dashes = []
     for s in strokes:
         if not s.get('visible', True):
             continue
         s_type = s.get('type', '')
         layer = FillLayer(type=s_type, visible=True, opacity=s.get('opacity', 1.0))
+        # Collect dashes from individual stroke items as fallback
+        item_dashes = s.get('strokeDashes', []) or s.get('dashPattern', []) or s.get('dashes', [])
+        if item_dashes and not stroke_item_dashes:
+            stroke_item_dashes = item_dashes
         if s_type == 'SOLID':
             layer.color = ColorValue.from_figma(s.get('color', {}), s.get('opacity', 1.0))
         elif 'GRADIENT' in s_type:
@@ -451,7 +468,7 @@ def parse_stroke(node: Dict[str, Any]) -> Optional[StrokeInfo]:
     if not colors:
         return None
 
-    dashes = node.get('strokeDashes', [])
+    dashes = node.get('strokeDashes', []) or node.get('dashPattern', []) or stroke_item_dashes
     individual = None
     iw = node.get('individualStrokeWeights')
     if iw:
@@ -906,6 +923,12 @@ def _transform_to_css(node: Dict[str, Any]) -> Optional[str]:
         b = relative_transform[0][1] if len(relative_transform[0]) > 1 else 0
         c = relative_transform[1][0] if len(relative_transform[1]) > 0 else 0
         d = relative_transform[1][1] if len(relative_transform[1]) > 1 else 1
+        # Detect horizontal/vertical flip (negative scale values)
+        if a < -0.01:
+            transforms.append("scaleX(-1)")
+        if d < -0.01:
+            transforms.append("scaleY(-1)")
+        # Check for non-unit scale (magnitude, since flip handled above)
         scale_x = (a**2 + c**2)**0.5
         scale_y = (b**2 + d**2)**0.5
         if abs(scale_x - 1) > 0.01 or abs(scale_y - 1) > 0.01:
