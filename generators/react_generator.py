@@ -117,8 +117,10 @@ def recursive_node_to_jsx(
         shadow_parts = []
         for shadow in effects_data['shadows']:
             offset = shadow.get('offset', {'x': 0, 'y': 0})
+            shadow_type = shadow.get('type', 'DROP_SHADOW')
+            inset_prefix = 'inset ' if shadow_type == 'INNER_SHADOW' else ''
             shadow_parts.append(
-                f"{int(offset.get('x', 0))}px {int(offset.get('y', 0))}px {int(shadow.get('radius', 0))}px {int(shadow.get('spread', 0))}px {shadow.get('color', '#000')}"
+                f"{inset_prefix}{int(offset.get('x', 0))}px {int(offset.get('y', 0))}px {int(shadow.get('radius', 0))}px {int(shadow.get('spread', 0))}px {shadow.get('color', '#000')}"
             )
         shadow_css = ', '.join(shadow_parts)
     if effects_data['blurs']:

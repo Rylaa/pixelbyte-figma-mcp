@@ -103,3 +103,52 @@ class TestBackdropBlur:
         }
         code = generate_react_code(node, 'LayerBlurBox', use_tailwind=True)
         assert "filter:" in code, "LAYER_BLUR should use filter property"
+
+
+class TestInnerShadow:
+    """Verify INNER_SHADOW includes inset keyword in CSS."""
+
+    def test_react_inner_shadow_has_inset(self, node_with_inner_shadow):
+        code = generate_react_code(node_with_inner_shadow, 'InsetBox', use_tailwind=True)
+        assert 'inset' in code.lower(), "INNER_SHADOW should include 'inset' keyword"
+
+    def test_react_drop_shadow_no_inset(self):
+        node = {
+            'type': 'RECTANGLE',
+            'absoluteBoundingBox': {'x': 0, 'y': 0, 'width': 200, 'height': 100},
+            'fills': [],
+            'strokes': [],
+            'effects': [{
+                'type': 'DROP_SHADOW', 'visible': True, 'radius': 4, 'spread': 0,
+                'color': {'r': 0, 'g': 0, 'b': 0, 'a': 0.25},
+                'offset': {'x': 0, 'y': 2}
+            }],
+            'children': [],
+        }
+        code = generate_react_code(node, 'DropBox', use_tailwind=True)
+        assert 'inset' not in code.lower(), "DROP_SHADOW should NOT include 'inset'"
+
+    def test_react_mixed_shadows(self):
+        """Node with both DROP_SHADOW and INNER_SHADOW."""
+        node = {
+            'type': 'RECTANGLE',
+            'absoluteBoundingBox': {'x': 0, 'y': 0, 'width': 200, 'height': 100},
+            'fills': [],
+            'strokes': [],
+            'effects': [
+                {
+                    'type': 'DROP_SHADOW', 'visible': True, 'radius': 4, 'spread': 0,
+                    'color': {'r': 0, 'g': 0, 'b': 0, 'a': 0.1},
+                    'offset': {'x': 0, 'y': 2}
+                },
+                {
+                    'type': 'INNER_SHADOW', 'visible': True, 'radius': 2, 'spread': 0,
+                    'color': {'r': 0, 'g': 0, 'b': 0, 'a': 0.2},
+                    'offset': {'x': 0, 'y': 1}
+                },
+            ],
+            'children': [],
+        }
+        code = generate_react_code(node, 'MixedBox', use_tailwind=True)
+        # Should have inset for inner, no inset for drop
+        assert 'inset' in code.lower(), "Mixed shadows should include 'inset' for INNER_SHADOW"
