@@ -139,7 +139,7 @@ TAILWIND_ALIGN_MAP = {
 # Initialize MCP Server
 # ============================================================================
 
-SERVER_VERSION = "3.2.13"
+SERVER_VERSION = "3.2.15"
 
 mcp = FastMCP("figma_mcp")
 
