@@ -111,7 +111,8 @@ def recursive_node_to_jsx(
     # Effects (shadows and blurs)
     effects_data = _extract_effects_data(node)
     shadow_css = ''
-    blur_css = ''
+    layer_blur_css = ''
+    backdrop_blur_css = ''
     if effects_data['shadows']:
         shadow_parts = []
         for shadow in effects_data['shadows']:
@@ -123,9 +124,9 @@ def recursive_node_to_jsx(
     if effects_data['blurs']:
         for blur in effects_data['blurs']:
             if blur.get('type') == 'LAYER_BLUR':
-                blur_css = f"blur({int(blur.get('radius', 0))}px)"
+                layer_blur_css = f"blur({int(blur.get('radius', 0))}px)"
             elif blur.get('type') == 'BACKGROUND_BLUR':
-                blur_css = f"blur({int(blur.get('radius', 0))}px)"
+                backdrop_blur_css = f"blur({int(blur.get('radius', 0))}px)"
 
     # Corner radius (with individual corners support)
     corner_radius_css = _corner_radii_to_css(node)
@@ -339,9 +340,11 @@ def recursive_node_to_jsx(
             if shadow_css:
                 classes.append(f'shadow-[{shadow_css}]')
 
-            # Blur filter
-            if blur_css:
-                inline_styles.append(f"filter: '{blur_css}'")
+            # Blur filters
+            if layer_blur_css:
+                inline_styles.append(f"filter: '{layer_blur_css}'")
+            if backdrop_blur_css:
+                inline_styles.append(f"backdropFilter: '{backdrop_blur_css}'")
 
             # Transform (rotation, scale)
             if transform_css:
@@ -429,9 +432,11 @@ def recursive_node_to_jsx(
             if shadow_css:
                 styles.append(f"boxShadow: '{shadow_css}'")
 
-            # Blur filter
-            if blur_css:
-                styles.append(f"filter: '{blur_css}'")
+            # Blur filters
+            if layer_blur_css:
+                styles.append(f"filter: '{layer_blur_css}'")
+            if backdrop_blur_css:
+                styles.append(f"backdropFilter: '{backdrop_blur_css}'")
 
             # Transform (rotation, scale)
             if transform_css:

@@ -80,3 +80,26 @@ class TestIndividualBorderWidths:
         code = generate_css_code(node_with_individual_borders, 'ind-borders')
         assert 'border-top-width' in code or 'border-top:' in code, "CSS should render individual top border"
         assert 'border-bottom-width' in code or 'border-bottom:' in code, "CSS should render individual bottom border"
+
+
+class TestBackdropBlur:
+    """Verify BACKGROUND_BLUR uses backdrop-filter, not filter."""
+
+    def test_react_background_blur_uses_backdrop_filter(self, node_with_background_blur):
+        code = generate_react_code(node_with_background_blur, 'BlurBox', use_tailwind=True)
+        assert 'backdropFilter' in code or 'backdrop-blur' in code, \
+            "BACKGROUND_BLUR should use backdropFilter, not filter"
+        assert "filter: 'blur" not in code, \
+            "BACKGROUND_BLUR should NOT use filter property"
+
+    def test_react_layer_blur_uses_filter(self):
+        node = {
+            'type': 'RECTANGLE',
+            'absoluteBoundingBox': {'x': 0, 'y': 0, 'width': 200, 'height': 100},
+            'fills': [],
+            'strokes': [],
+            'effects': [{'type': 'LAYER_BLUR', 'visible': True, 'radius': 8}],
+            'children': [],
+        }
+        code = generate_react_code(node, 'LayerBlurBox', use_tailwind=True)
+        assert "filter:" in code, "LAYER_BLUR should use filter property"
