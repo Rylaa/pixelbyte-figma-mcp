@@ -248,7 +248,20 @@ def generate_css_code(node: Dict[str, Any], component_name: str) -> str:
         if first_stroke.get('type') == 'SOLID':
             stroke_color = first_stroke.get('color', '')
             stroke_weight = stroke_data['weight']
-            stroke_css = f"border: {stroke_weight}px solid {stroke_color};"
+            stroke_dashes = stroke_data.get('dashes', [])
+            stroke_individual = stroke_data.get('individualWeights', {})
+            border_style = 'dashed' if stroke_dashes else 'solid'
+
+            if stroke_individual:
+                # Individual border widths per side
+                parts = []
+                for side in ['top', 'right', 'bottom', 'left']:
+                    w = stroke_individual.get(side, 0)
+                    if w:
+                        parts.append(f"border-{side}: {w}px {border_style} {stroke_color};")
+                stroke_css = '\n  '.join(parts)
+            else:
+                stroke_css = f"border: {stroke_weight}px {border_style} {stroke_color};"
 
     # Border radius (with individual corners)
     corner_radius_css = _corner_radii_to_css(node)

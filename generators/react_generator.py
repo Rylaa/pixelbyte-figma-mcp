@@ -101,6 +101,8 @@ def recursive_node_to_jsx(
     stroke_color = ''
     stroke_weight = stroke_data['weight'] if stroke_data else 0
     stroke_align = stroke_data['align'] if stroke_data else 'INSIDE'
+    stroke_dashes = stroke_data['dashes'] if stroke_data else []
+    stroke_individual = stroke_data.get('individualWeights', {}) if stroke_data else {}
     if stroke_data and stroke_data['colors']:
         first_stroke = stroke_data['colors'][0]
         if first_stroke.get('type') == 'SOLID':
@@ -317,8 +319,18 @@ def recursive_node_to_jsx(
 
             # Strokes
             if stroke_color and stroke_weight:
-                classes.append(f'border-[{stroke_weight}px]')
+                has_dashes = bool(stroke_dashes)
+                if stroke_individual:
+                    # Individual border widths
+                    for side, tw_prefix in [('top', 'border-t'), ('right', 'border-r'), ('bottom', 'border-b'), ('left', 'border-l')]:
+                        w = stroke_individual.get(side, 0)
+                        if w:
+                            classes.append(f'{tw_prefix}-[{w}px]')
+                else:
+                    classes.append(f'border-[{stroke_weight}px]')
                 classes.append(f'border-[{stroke_color}]')
+                if has_dashes:
+                    inline_styles.append("borderStyle: 'dashed'")
                 # Border position (only INSIDE is default in CSS)
                 if stroke_align == 'OUTSIDE':
                     inline_styles.append("boxSizing: 'content-box'")
