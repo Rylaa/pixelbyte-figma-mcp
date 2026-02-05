@@ -33,7 +33,11 @@ from generators.react_generator import generate_react_code as _generate_react_co
 from generators.vue_generator import generate_vue_code as _generate_vue_code
 from generators.css_generator import generate_css_code as _generate_css_code, generate_scss_code as _generate_scss_code
 from generators.kotlin_generator import generate_kotlin_code as _generate_kotlin_code
-from generators.base import sanitize_component_name as _sanitize_component_name
+from generators.base import (
+    sanitize_component_name as _sanitize_component_name,
+    MAX_CHILDREN_LIMIT,
+    MAX_NATIVE_CHILDREN_LIMIT,
+)
 
 
 # ============================================================================
@@ -130,16 +134,12 @@ TAILWIND_ALIGN_MAP = {
     'JUSTIFIED': 'text-justify'
 }
 
-# Max children limit for recursive operations
-MAX_CHILDREN_LIMIT = 20
-MAX_NATIVE_CHILDREN_LIMIT = 10  # Limit for SwiftUI/Kotlin to avoid excessive code
-
 
 # ============================================================================
 # Initialize MCP Server
 # ============================================================================
 
-SERVER_VERSION = "3.1.1"
+SERVER_VERSION = "3.2.13"
 
 mcp = FastMCP("figma_mcp")
 
@@ -962,7 +962,7 @@ def _extract_constraints(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _extract_transform(node: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract transform properties."""
+    """Extract transform properties including flip detection."""
     transform = {
         'rotation': node.get('rotation', 0),
         'preserveRatio': node.get('preserveRatio', False)
@@ -970,6 +970,18 @@ def _extract_transform(node: Dict[str, Any]) -> Dict[str, Any]:
 
     if 'relativeTransform' in node:
         transform['relativeTransform'] = node['relativeTransform']
+        # Detect flip from negative scale in transform matrix
+        # relativeTransform: [[a, b, tx], [c, d, ty]]
+        rt = node['relativeTransform']
+        try:
+            a = float(rt[0][0])
+            d = float(rt[1][1])
+            if a < 0:
+                transform['flippedHorizontally'] = True
+            if d < 0:
+                transform['flippedVertically'] = True
+        except (IndexError, TypeError, ValueError):
+            pass
 
     return transform
 
@@ -2025,7 +2037,7 @@ def _transform_to_css(node: Dict[str, Any]) -> Optional[str]:
         if abs(angle_deg) > 0.1:  # Only add if significant
             transforms.append(f"rotate({angle_deg:.1f}deg)")
 
-    # relativeTransform matrix (skew, scale)
+    # relativeTransform matrix (skew, scale, flip)
     relative_transform = node.get('relativeTransform')
     if relative_transform and len(relative_transform) >= 2:
         # relativeTransform is [[a, b, tx], [c, d, ty]]
@@ -2034,7 +2046,13 @@ def _transform_to_css(node: Dict[str, Any]) -> Optional[str]:
         c = relative_transform[1][0] if len(relative_transform[1]) > 0 else 0
         d = relative_transform[1][1] if len(relative_transform[1]) > 1 else 1
 
-        # Check for scale (not just rotation which we already handled)
+        # Detect horizontal/vertical flip (negative scale values)
+        if a < -0.01:
+            transforms.append("scaleX(-1)")
+        if d < -0.01:
+            transforms.append("scaleY(-1)")
+
+        # Check for non-unit scale (use absolute values since flip handled above)
         scale_x = (a**2 + c**2)**0.5
         scale_y = (b**2 + d**2)**0.5
         if abs(scale_x - 1) > 0.01 or abs(scale_y - 1) > 0.01:
@@ -2327,6 +2345,10 @@ def _build_css_ready_typography(text_props: Optional[Dict[str, Any]]) -> Optiona
 def _transform_to_css_from_details(transform: Dict[str, Any]) -> Optional[str]:
     """Convert extracted transform details to CSS transform string."""
     parts = []
+    if transform.get('flippedHorizontally'):
+        parts.append("scaleX(-1)")
+    if transform.get('flippedVertically'):
+        parts.append("scaleY(-1)")
     rotation = transform.get('rotation', 0)
     if rotation:
         angle_deg = -rotation * (180 / 3.14159265359)
@@ -3260,9 +3282,9 @@ async def figma_get_node_details(params: FigmaNodeInput) -> str:
         if constraints:
             node_details['constraints'] = constraints
 
-        # Transform
+        # Transform (includes rotation, scale, flip detection)
         transform = _extract_transform(node)
-        if transform.get('rotation') or transform.get('preserveRatio'):
+        if transform.get('rotation') or transform.get('preserveRatio') or transform.get('flippedHorizontally') or transform.get('flippedVertically'):
             node_details['transform'] = transform
 
         # Clip content
@@ -3550,6 +3572,10 @@ async def figma_get_node_details(params: FigmaNodeInput) -> str:
                 lines.append(f"- **Rotation:** {t['rotation']}°")
             if t.get('preserveRatio'):
                 lines.append(f"- **Preserve Ratio:** Yes")
+            if t.get('flippedHorizontally'):
+                lines.append(f"- **Flipped Horizontally:** Yes (scaleX: -1)")
+            if t.get('flippedVertically'):
+                lines.append(f"- **Flipped Vertically:** Yes (scaleY: -1)")
             lines.append("")
 
         # Clip content
@@ -4232,9 +4258,18 @@ async def figma_generate_code(params: FigmaCodeGenInput) -> str:
         str: Generated code in the requested framework
     """
     try:
-        # Use full file endpoint to get all nested children
-        data = await _make_figma_request(f"files/{params.file_key}")
-        node = _get_node_with_children(params.file_key, params.node_id, data)
+        # Use nodes endpoint to get full node tree with all properties
+        # (files endpoint may omit relativeTransform needed for flip detection)
+        if params.node_id:
+            data = await _make_figma_request(
+                f"files/{params.file_key}/nodes",
+                params={"ids": params.node_id}
+            )
+            nodes = data.get('nodes', {})
+            node = nodes.get(params.node_id, {}).get('document', {})
+        else:
+            data = await _make_figma_request(f"files/{params.file_key}")
+            node = data.get('document', {})
 
         if not node:
             return f"Error: Node '{params.node_id}' not found."
@@ -4292,7 +4327,7 @@ async def figma_generate_code(params: FigmaCodeGenInput) -> str:
             f"**Framework:** {params.framework.value}",
             f"**Source Node:** `{params.node_id}`",
             "",
-            "```" + ("tsx" if "react" in params.framework.value else "vue" if "vue" in params.framework.value else "html"),
+            "```" + {"react": "tsx", "react_tailwind": "tsx", "vue": "vue", "vue_tailwind": "vue", "swiftui": "swift", "kotlin": "kotlin", "css": "css", "scss": "scss"}.get(params.framework.value, "html"),
             code,
             "```"
         ]

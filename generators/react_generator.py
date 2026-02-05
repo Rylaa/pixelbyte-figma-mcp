@@ -101,6 +101,8 @@ def recursive_node_to_jsx(
     stroke_color = ''
     stroke_weight = stroke_data['weight'] if stroke_data else 0
     stroke_align = stroke_data['align'] if stroke_data else 'INSIDE'
+    stroke_dashes = stroke_data['dashes'] if stroke_data else []
+    stroke_individual = stroke_data.get('individualWeights', {}) if stroke_data else {}
     if stroke_data and stroke_data['colors']:
         first_stroke = stroke_data['colors'][0]
         if first_stroke.get('type') == 'SOLID':
@@ -109,21 +111,24 @@ def recursive_node_to_jsx(
     # Effects (shadows and blurs)
     effects_data = _extract_effects_data(node)
     shadow_css = ''
-    blur_css = ''
+    layer_blur_css = ''
+    backdrop_blur_css = ''
     if effects_data['shadows']:
         shadow_parts = []
         for shadow in effects_data['shadows']:
             offset = shadow.get('offset', {'x': 0, 'y': 0})
+            shadow_type = shadow.get('type', 'DROP_SHADOW')
+            inset_prefix = 'inset ' if shadow_type == 'INNER_SHADOW' else ''
             shadow_parts.append(
-                f"{int(offset.get('x', 0))}px {int(offset.get('y', 0))}px {int(shadow.get('radius', 0))}px {int(shadow.get('spread', 0))}px {shadow.get('color', '#000')}"
+                f"{inset_prefix}{int(offset.get('x', 0))}px {int(offset.get('y', 0))}px {int(shadow.get('radius', 0))}px {int(shadow.get('spread', 0))}px {shadow.get('color', '#000')}"
             )
         shadow_css = ', '.join(shadow_parts)
     if effects_data['blurs']:
         for blur in effects_data['blurs']:
             if blur.get('type') == 'LAYER_BLUR':
-                blur_css = f"blur({int(blur.get('radius', 0))}px)"
+                layer_blur_css = f"blur({int(blur.get('radius', 0))}px)"
             elif blur.get('type') == 'BACKGROUND_BLUR':
-                blur_css = f"blur({int(blur.get('radius', 0))}px)"
+                backdrop_blur_css = f"blur({int(blur.get('radius', 0))}px)"
 
     # Corner radius (with individual corners support)
     corner_radius_css = _corner_radii_to_css(node)
@@ -317,8 +322,18 @@ def recursive_node_to_jsx(
 
             # Strokes
             if stroke_color and stroke_weight:
-                classes.append(f'border-[{stroke_weight}px]')
+                has_dashes = bool(stroke_dashes)
+                if stroke_individual:
+                    # Individual border widths
+                    for side, tw_prefix in [('top', 'border-t'), ('right', 'border-r'), ('bottom', 'border-b'), ('left', 'border-l')]:
+                        w = stroke_individual.get(side, 0)
+                        if w:
+                            classes.append(f'{tw_prefix}-[{w}px]')
+                else:
+                    classes.append(f'border-[{stroke_weight}px]')
                 classes.append(f'border-[{stroke_color}]')
+                if has_dashes:
+                    inline_styles.append("borderStyle: 'dashed'")
                 # Border position (only INSIDE is default in CSS)
                 if stroke_align == 'OUTSIDE':
                     inline_styles.append("boxSizing: 'content-box'")
@@ -327,9 +342,11 @@ def recursive_node_to_jsx(
             if shadow_css:
                 classes.append(f'shadow-[{shadow_css}]')
 
-            # Blur filter
-            if blur_css:
-                inline_styles.append(f"filter: '{blur_css}'")
+            # Blur filters
+            if layer_blur_css:
+                inline_styles.append(f"filter: '{layer_blur_css}'")
+            if backdrop_blur_css:
+                inline_styles.append(f"backdropFilter: '{backdrop_blur_css}'")
 
             # Transform (rotation, scale)
             if transform_css:
@@ -417,9 +434,11 @@ def recursive_node_to_jsx(
             if shadow_css:
                 styles.append(f"boxShadow: '{shadow_css}'")
 
-            # Blur filter
-            if blur_css:
-                styles.append(f"filter: '{blur_css}'")
+            # Blur filters
+            if layer_blur_css:
+                styles.append(f"filter: '{layer_blur_css}'")
+            if backdrop_blur_css:
+                styles.append(f"backdropFilter: '{backdrop_blur_css}'")
 
             # Transform (rotation, scale)
             if transform_css:
@@ -468,7 +487,7 @@ def recursive_node_to_jsx(
 
         # Recursively add children
         children = node.get('children', [])
-        for child in children[:MAX_CHILDREN_LIMIT]:  # Limit to 20 children for safety
+        for child in children[:MAX_CHILDREN_LIMIT]:  # Safety limit
             child_jsx = recursive_node_to_jsx(child, indent + 2, use_tailwind)
             if child_jsx:
                 lines.append(child_jsx)

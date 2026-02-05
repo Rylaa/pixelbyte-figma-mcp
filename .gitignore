@@ -38,3 +38,6 @@ ENV/
 .DS_Store
 Thumbs.db
 firebase-debug.log
+
+# Git worktrees
+.worktrees/
